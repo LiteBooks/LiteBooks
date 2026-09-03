@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Users · LiteBooks{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Access control</p><h1>Users</h1></div></div>
+<div class="two-column">
+  <section><h2>Current users</h2><div class="table-wrap"><table><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody>{% for item in users %}<tr><td>{{ item.username }}</td><td>{{ item.get_full_name|default:"—" }}</td><td><span class="badge">{{ item.profile.get_role_display }}</span></td><td>{% if item.is_active %}Active{% else %}Inactive{% endif %}</td><td class="actions"><a href="{% url 'user-edit' item.pk %}">Edit</a></td></tr>{% endfor %}</tbody></table></div></section>
+  <section class="form-surface"><h2>New user</h2><form method="post" class="stack-form">{% csrf_token %}{% if form.non_field_errors %}<div class="form-errors">{{ form.non_field_errors }}</div>{% endif %}{% for field in form %}<div class="field"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{{ field.errors }}</div>{% endfor %}<button class="button primary" type="submit">Create user</button></form></section>
+</div>
+{% endblock %}

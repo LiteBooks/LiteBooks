@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Invoices & bills · LiteBooks{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Accounts receivable and payable</p><h1>Invoices &amp; bills</h1></div>{% if can_edit_books %}<div class="button-row"><a class="button secondary" href="{% url 'document-create' 'bill' %}">New bill</a><a class="button primary" href="{% url 'document-create' 'invoice' %}">New invoice</a></div>{% endif %}</div>
+<nav class="tabs"><a href="{% url 'document-list' %}?kind=invoice" {% if kind == 'invoice' %}class="active"{% endif %}>Invoices</a><a href="{% url 'document-list' %}?kind=bill" {% if kind == 'bill' %}class="active"{% endif %}>Bills</a></nav>
+<div class="table-wrap"><table><thead><tr><th>Number</th><th>Contact</th><th>Issued</th><th>Due</th><th>Status</th><th class="amount">Total</th><th class="amount">Balance</th></tr></thead><tbody>
+{% for document in documents %}<tr><td><a href="{% url 'document-detail' document.pk %}">{{ document.number }}</a><small>{{ document.description }}</small></td><td>{{ document.contact.name }}</td><td>{{ document.issue_date|date:"M j, Y" }}</td><td>{{ document.due_date|date:"M j, Y" }}</td><td><span class="badge status-{{ document.status }}">{{ document.get_status_display }}</span></td><td class="amount">${{ document.amount|floatformat:2 }}</td><td class="amount">${{ document.balance_due|floatformat:2 }}</td></tr>
+{% empty %}<tr><td colspan="7" class="empty">No {{ kind_label|lower }} records yet.</td></tr>{% endfor %}
+</tbody></table></div>
+{% endblock %}
+

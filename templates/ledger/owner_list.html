@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Owners · LiteBooks{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Equity and liabilities</p><h1>Owner balances</h1></div>{% if can_edit_books %}<a class="button primary" href="{% url 'owner-activity-create' %}">New owner activity</a>{% endif %}</div>
+<div class="table-wrap"><table><thead><tr><th>Owner</th><th class="amount">Contributions</th><th class="amount">Draws</th><th class="amount">Amount owed to owner</th></tr></thead><tbody>
+{% for row in rows %}<tr><td>{{ row.owner.name }}</td><td class="amount">${{ row.contributions|floatformat:2 }}</td><td class="amount">${{ row.draws|floatformat:2 }}</td><td class="amount"><strong>${{ row.owed|floatformat:2 }}</strong></td></tr>{% empty %}<tr><td colspan="4" class="empty">Create an owner contact and post owner activity to see balances.</td></tr>{% endfor %}
+</tbody></table></div>
+<section class="section-block"><h2>Recent activity</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Owner</th><th>Type</th><th>Transaction</th><th class="amount">Amount</th></tr></thead><tbody>
+{% for activity in activities %}<tr><td>{{ activity.journal_entry.date|date:"M j, Y" }}</td><td>{{ activity.owner.name }}</td><td>{{ activity.get_kind_display }}</td><td><a href="{% url 'transaction-detail' activity.journal_entry.pk %}">{{ activity.journal_entry.number }}</a></td><td class="amount">${{ activity.amount|floatformat:2 }}</td></tr>{% empty %}<tr><td colspan="5" class="empty">No owner activity yet.</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% endblock %}
+

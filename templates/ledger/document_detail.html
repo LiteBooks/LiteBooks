@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}{{ document }} · LiteBooks{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">{{ document.get_kind_display }} · {{ document.get_status_display }}</p><h1>{{ document.number }}</h1><p class="subheading">{{ document.contact.name }}</p></div>{% if can_edit_books and document.balance_due > 0 and document.status != 'void' %}<a class="button primary" href="{% url 'payment-create' document.pk %}">Record payment</a>{% endif %}</div>
+<section class="document-summary"><div><span>Issued</span><strong>{{ document.issue_date|date:"M j, Y" }}</strong></div><div><span>Due</span><strong>{{ document.due_date|date:"M j, Y" }}</strong></div><div><span>Total</span><strong>${{ document.amount|floatformat:2 }}</strong></div><div><span>Balance due</span><strong>${{ document.balance_due|floatformat:2 }}</strong></div></section>
+<dl class="detail-grid"><div><dt>Description</dt><dd>{{ document.description }}</dd></div><div><dt>Posted transaction</dt><dd><a href="{% url 'transaction-detail' document.journal_entry.pk %}">{{ document.journal_entry.number }}</a></dd></div><div><dt>Control account</dt><dd>{{ document.control_account }}</dd></div><div><dt>Category account</dt><dd>{{ document.category_account }}</dd></div></dl>
+<section class="section-block"><h2>Payments</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Transaction</th><th>Bank or cash account</th><th class="amount">Amount</th></tr></thead><tbody>
+{% for payment in document.payments.all %}<tr><td>{{ payment.date|date:"M j, Y" }}</td><td><a href="{% url 'transaction-detail' payment.journal_entry.pk %}">{{ payment.journal_entry.number }}</a></td><td>{{ payment.cash_account }}</td><td class="amount">${{ payment.amount|floatformat:2 }}</td></tr>{% empty %}<tr><td colspan="4" class="empty">No payments recorded.</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% endblock %}
+

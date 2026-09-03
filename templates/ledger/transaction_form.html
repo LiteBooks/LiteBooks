@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · LiteBooks{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">General journal</p><h1>{{ title }}</h1></div>{% if quick %}<a href="{% url 'transaction-split-create' %}">Use a split entry</a>{% endif %}</div>
+<form method="post" enctype="multipart/form-data" class="form-surface" novalidate>
+  {% csrf_token %}
+  {% if form.non_field_errors %}<div class="form-errors">{{ form.non_field_errors }}</div>{% endif %}
+  {% if quick %}
+    <div class="form-grid">
+      {% for field in form %}<div class="field {% if field.name == 'description' or field.name == 'memo' or field.name == 'attachment' %}span-2{% endif %}"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% if field.help_text %}<small>{{ field.help_text }}</small>{% endif %}{{ field.errors }}</div>{% endfor %}
+    </div>
+  {% else %}
+    <div class="form-grid">
+      {% for field in form %}<div class="field {% if field.name == 'description' or field.name == 'memo' or field.name == 'attachment' %}span-2{% endif %}"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% if field.help_text %}<small>{{ field.help_text }}</small>{% endif %}{{ field.errors }}</div>{% endfor %}
+    </div>
+    <div class="line-editor" data-formset data-prefix="{{ formset.prefix }}">
+      {{ formset.management_form }}
+      {% if formset.non_form_errors %}<div class="form-errors">{{ formset.non_form_errors }}</div>{% endif %}
+      <div class="section-heading"><h2>Journal lines</h2><button type="button" class="button secondary small" data-add-line>Add line</button></div>
+      <div class="line-grid line-grid-head"><span>Account</span><span>Description</span><span>Debit</span><span>Credit</span><span>Owner</span><span></span></div>
+      <div data-line-list>
+      {% for line_form in formset %}
+        <div class="line-grid line-row" data-line-row>
+          {% for hidden in line_form.hidden_fields %}{{ hidden }}{% endfor %}
+          <div>{{ line_form.account }}{{ line_form.account.errors }}</div>
+          <div>{{ line_form.description }}{{ line_form.description.errors }}</div>
+          <div>{{ line_form.debit }}{{ line_form.debit.errors }}</div>
+          <div>{{ line_form.credit }}{{ line_form.credit.errors }}</div>
+          <div>{{ line_form.owner }}{{ line_form.owner.errors }}</div>
+          <div class="line-delete">{{ line_form.DELETE }}<label for="{{ line_form.DELETE.id_for_label }}">Remove</label></div>
+          {% if line_form.non_field_errors %}<div class="line-error">{{ line_form.non_field_errors }}</div>{% endif %}
+        </div>
+      {% endfor %}
+      </div>
+      <template data-empty-line>
+        <div class="line-grid line-row" data-line-row>
+          {% with line_form=formset.empty_form %}
+          {% for hidden in line_form.hidden_fields %}{{ hidden }}{% endfor %}
+          <div>{{ line_form.account }}</div><div>{{ line_form.description }}</div><div>{{ line_form.debit }}</div><div>{{ line_form.credit }}</div><div>{{ line_form.owner }}</div>
+          <div class="line-delete">{{ line_form.DELETE }}<label for="{{ line_form.DELETE.id_for_label }}">Remove</label></div>
+          {% endwith %}
+        </div>
+      </template>
+    </div>
+  {% endif %}
+  <div class="form-actions"><a class="button quiet" href="{% if entry %}{% url 'transaction-detail' entry.pk %}{% else %}{% url 'transaction-list' %}{% endif %}">Cancel</a><button class="button primary" type="submit">Post transaction</button></div>
+</form>
+{% endblock %}
+

@@ -1,0 +1,62 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}LiteBooks{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+</head>
+<body>
+  {% if user.is_authenticated %}
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="{% url 'dashboard' %}">
+        <span class="brand-mark">LB</span>
+        <span>LiteBooks</span>
+      </a>
+      <nav class="primary-nav" aria-label="Primary navigation">
+        <a href="{% url 'dashboard' %}" {% if request.resolver_match.url_name == 'dashboard' %}class="active"{% endif %}>Overview</a>
+        <a href="{% url 'transaction-list' %}" {% if 'transaction' in request.resolver_match.url_name %}class="active"{% endif %}>Transactions</a>
+        <a href="{% url 'account-list' %}" {% if 'account' in request.resolver_match.url_name %}class="active"{% endif %}>Accounts</a>
+        <a href="{% url 'document-list' %}" {% if 'document' in request.resolver_match.url_name or 'payment' in request.resolver_match.url_name %}class="active"{% endif %}>Invoices &amp; bills</a>
+        <a href="{% url 'contact-list' %}" {% if 'contact' in request.resolver_match.url_name %}class="active"{% endif %}>Contacts</a>
+        <a href="{% url 'owner-list' %}" {% if 'owner' in request.resolver_match.url_name %}class="active"{% endif %}>Owners</a>
+        <a href="{% url 'reports' %}" {% if 'report' in request.resolver_match.url_name %}class="active"{% endif %}>Reports</a>
+      </nav>
+      <div class="sidebar-footer">
+        {% if can_administer %}
+          <a href="{% url 'period-list' %}">Period locks</a>
+          <a href="{% url 'user-list' %}">Users</a>
+        {% endif %}
+        <a href="{% url 'audit-list' %}">Audit history</a>
+        <form method="post" action="{% url 'logout' %}">
+          {% csrf_token %}
+          <button class="link-button" type="submit">Sign out</button>
+        </form>
+        <span class="user-caption">{{ user.get_full_name|default:user.username }} · {{ current_role|title }}</span>
+      </div>
+    </aside>
+    <div class="content-shell">
+      <header class="mobile-header">
+        <button class="icon-button" type="button" data-sidebar-toggle aria-label="Open navigation">☰</button>
+        <a class="brand" href="{% url 'dashboard' %}"><span class="brand-mark">LB</span><span>LiteBooks</span></a>
+      </header>
+      <main class="main-content">
+        {% if messages %}
+        <div class="messages" role="status">
+          {% for message in messages %}<div class="message {{ message.tags }}">{{ message }}</div>{% endfor %}
+        </div>
+        {% endif %}
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+  {% else %}
+    <main class="auth-shell">{% block auth_content %}{% endblock %}</main>
+  {% endif %}
+  <script src="{% static 'js/app.js' %}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
+

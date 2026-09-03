@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · LiteBooks{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Financial report</p><h1>{{ title }}</h1></div><button class="button secondary" type="button" onclick="window.print()">Print</button></div>
+<form method="get" class="filter-bar report-filter">
+  {% if report == 'income-statement' or report == 'general-ledger' %}<label>From<input type="date" name="start" value="{{ start|date:'Y-m-d' }}"></label><label>Through<input type="date" name="end" value="{{ end|date:'Y-m-d' }}"></label>{% else %}<label>As of<input type="date" name="as_of" value="{{ as_of|date:'Y-m-d' }}"></label>{% endif %}
+  <button class="button secondary" type="submit">Run report</button>
+</form>
+{% if report == 'trial-balance' %}
+<div class="table-wrap"><table><thead><tr><th>Account</th><th class="amount">Debit balance</th><th class="amount">Credit balance</th></tr></thead><tbody>{% for row in rows %}{% if row.debit_balance or row.credit_balance %}<tr><td><a href="{% url 'account-detail' row.account.pk %}">{{ row.account }}</a></td><td class="amount">{% if row.debit_balance %}${{ row.debit_balance|floatformat:2 }}{% else %}—{% endif %}</td><td class="amount">{% if row.credit_balance %}${{ row.credit_balance|floatformat:2 }}{% else %}—{% endif %}</td></tr>{% endif %}{% endfor %}<tr class="total-row"><td>Total</td><td class="amount">${{ total_debits|floatformat:2 }}</td><td class="amount">${{ total_credits|floatformat:2 }}</td></tr></tbody></table></div>
+{% elif report == 'balance-sheet' %}
+  {% for label, group in groups.items %}<section class="statement-group"><h2>{{ label|title }}</h2>{% for row in group.rows %}<div class="statement-row"><a href="{% url 'account-detail' row.account.pk %}">{{ row.account.name }}</a><span>${{ row.balance|floatformat:2 }}</span></div>{% endfor %}{% if label == 'equity' %}<div class="statement-row"><span>Current earnings</span><span>${{ group.current_earnings|floatformat:2 }}</span></div>{% endif %}<div class="statement-total"><strong>Total {{ label }}</strong><strong>${{ group.total|floatformat:2 }}</strong></div></section>{% endfor %}
+{% elif report == 'income-statement' %}
+  <section class="statement-group"><h2>Revenue</h2>{% for row in revenue %}<div class="statement-row"><a href="{% url 'account-detail' row.account.pk %}">{{ row.account.name }}</a><span>${{ row.balance|floatformat:2 }}</span></div>{% endfor %}<div class="statement-total"><strong>Total revenue</strong><strong>${{ revenue_total|floatformat:2 }}</strong></div></section>
+  <section class="statement-group"><h2>Expenses</h2>{% for row in expenses %}<div class="statement-row"><a href="{% url 'account-detail' row.account.pk %}">{{ row.account.name }}</a><span>${{ row.balance|floatformat:2 }}</span></div>{% endfor %}<div class="statement-total"><strong>Total expenses</strong><strong>${{ expense_total|floatformat:2 }}</strong></div></section>
+  <div class="statement-grand-total"><strong>Net income</strong><strong>${{ net_income|floatformat:2 }}</strong></div>
+{% elif report == 'general-ledger' %}
+<div class="table-wrap"><table class="dense-table"><thead><tr><th>Date</th><th>Transaction</th><th>Account</th><th>Description</th><th class="amount">Debit</th><th class="amount">Credit</th></tr></thead><tbody>{% for line in lines %}<tr><td>{{ line.entry.date|date:"M j, Y" }}</td><td><a href="{% url 'transaction-detail' line.entry.pk %}">{{ line.entry.number }}</a></td><td>{{ line.account }}</td><td>{{ line.description|default:line.entry.description }}</td><td class="amount">${{ line.debit|floatformat:2 }}</td><td class="amount">${{ line.credit|floatformat:2 }}</td></tr>{% empty %}<tr><td colspan="6" class="empty">No activity in this period.</td></tr>{% endfor %}</tbody></table></div>
+{% elif report == 'receivables-aging' or report == 'payables-aging' %}
+<div class="aging-summary">{% for bucket, total in buckets.items %}<div><span>{{ bucket }}</span><strong>${{ total|floatformat:2 }}</strong></div>{% endfor %}</div>
+<div class="table-wrap"><table><thead><tr><th>Document</th><th>Contact</th><th>Due date</th><th>Days overdue</th><th>Bucket</th><th class="amount">Balance</th></tr></thead><tbody>{% for row in rows %}<tr><td><a href="{% url 'document-detail' row.document.pk %}">{{ row.document.number }}</a></td><td>{{ row.document.contact.name }}</td><td>{{ row.document.due_date|date:"M j, Y" }}</td><td>{{ row.days }}</td><td>{{ row.bucket }}</td><td class="amount">${{ row.balance|floatformat:2 }}</td></tr>{% empty %}<tr><td colspan="6" class="empty">No open items.</td></tr>{% endfor %}</tbody></table></div>
+{% elif report == 'owner-balances' %}
+<div class="table-wrap"><table><thead><tr><th>Owner</th><th class="amount">Contributions</th><th class="amount">Draws</th><th class="amount">Amount owed</th></tr></thead><tbody>{% for row in rows %}<tr><td>{{ row.owner.name }}</td><td class="amount">${{ row.contributions|floatformat:2 }}</td><td class="amount">${{ row.draws|floatformat:2 }}</td><td class="amount">${{ row.owed|floatformat:2 }}</td></tr>{% endfor %}</tbody></table></div>
+{% endif %}
+{% endblock %}

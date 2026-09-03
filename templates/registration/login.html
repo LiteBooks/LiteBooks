@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Sign in · LiteBooks{% endblock %}
+{% block auth_content %}
+<section class="login-panel">
+  <div class="login-brand"><span class="brand-mark">LB</span><h1>LiteBooks</h1></div>
+  <p class="muted">Business books, kept close.</p>
+  <form method="post" class="stack-form">
+    {% csrf_token %}
+    {% if form.non_field_errors %}<div class="form-errors">{{ form.non_field_errors }}</div>{% endif %}
+    <div class="field"><label for="{{ form.username.id_for_label }}">Username</label>{{ form.username }}</div>
+    <div class="field"><label for="{{ form.password.id_for_label }}">Password</label>{{ form.password }}</div>
+    <button class="button primary wide" type="submit">Sign in</button>
+  </form>
+</section>
+{% endblock %}
+

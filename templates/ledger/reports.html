@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Reports · LiteBooks{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Financial statements and ledgers</p><h1>Reports</h1></div><a class="button primary" href="{% url 'export-workbook' %}">Export Excel workbook</a></div>
+<div class="report-list">
+  <a href="{% url 'report-view' 'balance-sheet' %}"><strong>Balance sheet</strong><span>Assets, liabilities, and equity as of a date</span></a>
+  <a href="{% url 'report-view' 'income-statement' %}"><strong>Profit and loss</strong><span>Revenue and expenses over a period</span></a>
+  <a href="{% url 'report-view' 'trial-balance' %}"><strong>Trial balance</strong><span>Debit and credit totals by account</span></a>
+  <a href="{% url 'report-view' 'general-ledger' %}"><strong>General ledger</strong><span>Every posted journal line</span></a>
+  <a href="{% url 'report-view' 'receivables-aging' %}"><strong>Receivables aging</strong><span>Open customer invoices by age</span></a>
+  <a href="{% url 'report-view' 'payables-aging' %}"><strong>Payables aging</strong><span>Open vendor bills by age</span></a>
+  <a href="{% url 'report-view' 'owner-balances' %}"><strong>Owner balances</strong><span>Contributions, draws, and loans payable</span></a>
+</div>
+{% endblock %}
+

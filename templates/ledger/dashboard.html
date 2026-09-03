@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Overview · LiteBooks{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><p class="eyebrow">Company overview</p><h1>Financial snapshot</h1></div>
+  {% if can_edit_books %}<a class="button primary" href="{% url 'transaction-create' %}">New transaction</a>{% endif %}
+</div>
+<section class="metric-grid" aria-label="Key balances">
+  <div class="metric"><span>Cash</span><strong>${{ cash|floatformat:2 }}</strong></div>
+  <div class="metric"><span>Receivables</span><strong>${{ receivables|floatformat:2 }}</strong></div>
+  <div class="metric"><span>Payables</span><strong>${{ payables|floatformat:2 }}</strong></div>
+  <div class="metric"><span>Year-to-date net income</span><strong class="{% if net_income < 0 %}negative{% endif %}">${{ net_income|floatformat:2 }}</strong></div>
+</section>
+<section class="section-block">
+  <div class="section-heading"><h2>Recent transactions</h2><a href="{% url 'transaction-list' %}">View all</a></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Date</th><th>Number</th><th>Description</th><th>Source</th><th class="amount">Amount</th></tr></thead>
+      <tbody>
+        {% for entry in recent_entries %}
+        <tr><td>{{ entry.date|date:"M j, Y" }}</td><td><a href="{% url 'transaction-detail' entry.pk %}">{{ entry.number }}</a></td><td>{{ entry.description }}</td><td><span class="badge">{{ entry.get_source_display }}</span></td><td class="amount">${{ entry.total|floatformat:2 }}</td></tr>
+        {% empty %}<tr><td colspan="5" class="empty">No transactions yet.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
+

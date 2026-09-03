@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}{{ entry.number }} · LiteBooks{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><p class="eyebrow">{{ entry.get_source_display }} · {{ entry.status|title }}</p><h1>{{ entry.number }}</h1><p class="subheading">{{ entry.description }}</p></div>
+  {% if can_edit_books and entry.source == 'general' %}<a class="button secondary" href="{% url 'transaction-edit' entry.pk %}">Edit transaction</a>{% endif %}
+</div>
+<dl class="detail-grid">
+  <div><dt>Date</dt><dd>{{ entry.date|date:"F j, Y" }}</dd></div><div><dt>Contact</dt><dd>{{ entry.contact.name|default:"—" }}</dd></div>
+  <div><dt>Version</dt><dd>{{ entry.version }}</dd></div><div><dt>Created by</dt><dd>{{ entry.created_by.username }}</dd></div>
+  {% if entry.linked_entry %}<div><dt>Linked transaction</dt><dd><a href="{% url 'transaction-detail' entry.linked_entry.pk %}">{{ entry.linked_entry.number }}</a></dd></div>{% endif %}
+</dl>
+{% if entry.memo %}<div class="note-block"><strong>Memo</strong><p>{{ entry.memo|linebreaksbr }}</p></div>{% endif %}
+<section class="section-block">
+  <h2>Journal entry</h2>
+  <div class="table-wrap"><table><thead><tr><th>Account</th><th>Description</th><th>Owner</th><th class="amount">Debit</th><th class="amount">Credit</th></tr></thead><tbody>
+  {% for line in entry.lines.all %}<tr><td><a href="{% url 'account-detail' line.account.pk %}">{{ line.account }}</a></td><td>{{ line.description|default:"—" }}</td><td>{{ line.owner.name|default:"—" }}</td><td class="amount">{% if line.debit %}${{ line.debit|floatformat:2 }}{% else %}—{% endif %}</td><td class="amount">{% if line.credit %}${{ line.credit|floatformat:2 }}{% else %}—{% endif %}</td></tr>{% endfor %}
+  <tr class="total-row"><td colspan="3">Total</td><td class="amount">${{ entry.total|floatformat:2 }}</td><td class="amount">${{ entry.total|floatformat:2 }}</td></tr>
+  </tbody></table></div>
+</section>
+{% if entry.attachments.all %}<section class="section-block"><h2>Attachments</h2><div class="attachment-list">{% for item in entry.attachments.all %}<a href="{% url 'attachment-download' item.pk %}">{{ item.original_name }} <small>{{ item.size|filesizeformat }}</small></a>{% endfor %}</div></section>{% endif %}
+{% if audits %}<section class="section-block"><h2>Change history</h2><div class="timeline">{% for event in audits %}<div><strong>{{ event.action|title }}</strong><span>{{ event.created_at|date:"M j, Y g:i A" }} by {{ event.actor.username|default:"system" }}</span></div>{% endfor %}</div></section>{% endif %}
+{% endblock %}
+

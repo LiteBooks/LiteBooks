@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Accounts · LiteBooks{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Chart of accounts</p><h1>Accounts</h1></div>{% if can_administer %}<a class="button primary" href="{% url 'account-create' %}">New account</a>{% endif %}</div>
+<div class="table-wrap"><table><thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Subtype</th><th>Status</th><th class="amount">Balance</th></tr></thead><tbody>
+{% for account in accounts %}<tr><td>{{ account.code }}</td><td><a href="{% url 'account-detail' account.pk %}">{{ account.name }}</a>{% if account.description %}<small>{{ account.description|truncatechars:80 }}</small>{% endif %}</td><td>{{ account.get_type_display }}</td><td>{{ account.get_subtype_display|default:"—" }}</td><td><span class="status-dot {% if account.is_active %}active{% endif %}"></span>{% if account.is_active %}Active{% else %}Inactive{% endif %}</td><td class="amount">${{ account.display_balance|floatformat:2 }}</td></tr>
+{% empty %}<tr><td colspan="6" class="empty">No accounts yet.</td></tr>{% endfor %}
+</tbody></table></div>
+{% endblock %}
+

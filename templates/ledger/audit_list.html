@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Audit history · LiteBooks{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Change log</p><h1>Audit history</h1></div></div>
+<div class="table-wrap"><table class="dense-table"><thead><tr><th>When</th><th>User</th><th>Action</th><th>Object</th><th>Record</th></tr></thead><tbody>{% for event in events %}<tr><td>{{ event.created_at|date:"M j, Y g:i A" }}</td><td>{{ event.actor.username|default:"system" }}</td><td><span class="badge">{{ event.action|title }}</span></td><td>{{ event.object_type }}</td><td>{{ event.object_id }}</td></tr>{% empty %}<tr><td colspan="5" class="empty">No audited changes yet.</td></tr>{% endfor %}</tbody></table></div>
+{% endblock %}
+

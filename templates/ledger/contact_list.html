@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Contacts · LiteBooks{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Customers, vendors, and owners</p><h1>Contacts</h1></div>{% if can_edit_books %}<a class="button primary" href="{% url 'contact-create' %}">New contact</a>{% endif %}</div>
+<form class="filter-bar" method="get"><select name="kind" aria-label="Contact type"><option value="">All contact types</option>{% for value, label in kind_choices %}<option value="{{ value }}" {% if selected_kind == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select><button class="button secondary" type="submit">Filter</button></form>
+<div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Email</th><th>Phone</th><th>Status</th><th></th></tr></thead><tbody>
+{% for contact in contacts %}<tr><td>{{ contact.name }}</td><td><span class="badge">{{ contact.get_kind_display }}</span></td><td>{{ contact.email|default:"—" }}</td><td>{{ contact.phone|default:"—" }}</td><td>{% if contact.is_active %}Active{% else %}Inactive{% endif %}</td><td class="actions">{% if can_edit_books %}<a href="{% url 'contact-edit' contact.pk %}">Edit</a>{% endif %}</td></tr>
+{% empty %}<tr><td colspan="6" class="empty">No contacts yet.</td></tr>{% endfor %}
+</tbody></table></div>
+{% endblock %}
+

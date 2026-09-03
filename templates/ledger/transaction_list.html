@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Transactions · LiteBooks{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><p class="eyebrow">General journal</p><h1>All transactions</h1></div>
+  {% if can_edit_books %}<div class="button-row"><a class="button secondary" href="{% url 'transaction-split-create' %}">Split entry</a><a class="button primary" href="{% url 'transaction-create' %}">New transaction</a></div>{% endif %}
+</div>
+<form method="get" class="filter-bar">
+  <div class="filter-search"><label class="sr-only" for="q">Search</label><input id="q" name="q" value="{{ filters.q }}" placeholder="Search number, description, contact"></div>
+  <select name="account" aria-label="Account"><option value="">All accounts</option>{% for account in accounts %}<option value="{{ account.pk }}" {% if filters.account == account.pk|stringformat:'s' %}selected{% endif %}>{{ account }}</option>{% endfor %}</select>
+  <select name="source" aria-label="Source"><option value="">All sources</option>{% for value, label in source_choices %}<option value="{{ value }}" {% if filters.source == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+  <input type="date" name="start" value="{{ filters.start }}" aria-label="Start date">
+  <input type="date" name="end" value="{{ filters.end }}" aria-label="End date">
+  <button class="button secondary" type="submit">Filter</button>
+  <a class="button quiet" href="{% url 'transaction-list' %}">Clear</a>
+</form>
+<div class="table-wrap">
+  <table class="dense-table">
+    <thead><tr><th>Date</th><th>Number</th><th>Description</th><th>Accounts</th><th>Contact</th><th>Source</th><th class="amount">Amount</th></tr></thead>
+    <tbody>
+      {% for entry in entries %}
+      <tr>
+        <td>{{ entry.date|date:"M j, Y" }}</td>
+        <td><a href="{% url 'transaction-detail' entry.pk %}">{{ entry.number }}</a>{% if entry.version > 1 %}<small>v{{ entry.version }}</small>{% endif %}</td>
+        <td>{{ entry.description }}{% if entry.linked_entry %}<small>Linked to {{ entry.linked_entry.number }}</small>{% endif %}</td>
+        <td class="account-summary">{% for line in entry.lines.all %}<span>{{ line.account.code }} {{ line.account.name }}</span>{% endfor %}</td>
+        <td>{{ entry.contact.name|default:"—" }}</td>
+        <td><span class="badge">{{ entry.get_source_display }}</span></td>
+        <td class="amount">${{ entry.total|floatformat:2 }}</td>
+      </tr>
+      {% empty %}<tr><td colspan="7" class="empty">No transactions match these filters.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+

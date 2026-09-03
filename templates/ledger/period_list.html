@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Period locks · LiteBooks{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Accounting controls</p><h1>Monthly period locks</h1></div></div>
+<form method="post" class="inline-form form-surface">{% csrf_token %}{% for field in form %}<div class="field"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{{ field.errors }}</div>{% endfor %}<button class="button secondary" type="submit">Add period</button></form>
+<div class="table-wrap"><table><thead><tr><th>Period</th><th>Status</th><th>Changed by</th><th>Changed at</th><th></th></tr></thead><tbody>
+{% for period in periods %}<tr><td>{{ period }}</td><td><span class="badge status-{% if period.is_closed %}closed{% else %}open{% endif %}">{% if period.is_closed %}Closed{% else %}Open{% endif %}</span></td><td>{{ period.closed_by.username|default:"—" }}</td><td>{{ period.closed_at|date:"M j, Y g:i A"|default:"—" }}</td><td class="actions"><form method="post" action="{% url 'period-toggle' period.pk %}">{% csrf_token %}<button class="button quiet small" type="submit">{% if period.is_closed %}Reopen{% else %}Close{% endif %}</button></form></td></tr>{% empty %}<tr><td colspan="5" class="empty">No explicit periods yet. Months remain open until closed here.</td></tr>{% endfor %}
+</tbody></table></div>
+{% endblock %}
+
