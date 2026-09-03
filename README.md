@@ -27,63 +27,25 @@ git clone https://github.com/LiteBooks/LiteBooks.git
 cd LiteBooks
 ```
 
-### 2. Create your private configuration
-
-Copy the supplied example file:
+### 2. Run the installer
 
 ```bash
-cp .env.example .env
+./install.sh
 ```
 
-Generate two random values. Run the command twice and keep the results separate:
+The installer creates `.env`, generates private secrets, builds and starts the Docker Compose stack, runs database migrations, and prompts for the first owner login password.
 
-```bash
-openssl rand -hex 32
-```
-
-Open `.env` in a text editor and replace:
-
-- `DJANGO_SECRET_KEY` with the first random value
-- `POSTGRES_PASSWORD` with the second random value
-- `DJANGO_TIME_ZONE` with your local IANA time zone, such as `America/Los_Angeles` or `Europe/London`
-
-Do not reuse your LiteBooks login password for either value. Do not publish or commit `.env`.
-
-For access only from the server itself, the default allowed hosts are sufficient. For access from another computer on your network, add the server's IP address or local hostname to `DJANGO_ALLOWED_HOSTS`:
+For access from another computer on your network, add the server's IP address or local hostname to `DJANGO_ALLOWED_HOSTS` in `.env`, then apply the setting:
 
 ```dotenv
 DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,192.168.1.50,books.lan
 ```
 
-### 3. Start LiteBooks
-
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
-The first build downloads the required images and can take several minutes. Confirm that both containers are running:
-
-```bash
-docker compose ps
-```
-
-The `db` service should report healthy and the `web` service should report running.
-
-### 4. Create the first owner login
-
-Replace the example username and password below. The password must contain at least eight characters.
-
-```bash
-docker compose exec web python manage.py bootstrap_litebooks \
-  --username admin \
-  --password 'choose-a-long-unique-password' \
-  --first-name 'Your' \
-  --last-name 'Name'
-```
-
-This creates the first owner and a starter chart of accounts. It is safe to run the command again if setup was interrupted; existing accounts are not duplicated.
-
-### 5. Open the application
+### 3. Open the application
 
 On the server, open:
 

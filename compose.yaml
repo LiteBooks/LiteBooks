@@ -17,21 +17,35 @@ services:
   web:
     build: .
     restart: unless-stopped
-    env_file: .env
     environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?Set DJANGO_SECRET_KEY in .env}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-false}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-}
+      DJANGO_TIME_ZONE: ${DJANGO_TIME_ZONE:-America/Los_Angeles}
+      DJANGO_SECURE_COOKIES: ${DJANGO_SECURE_COOKIES:-false}
+      DJANGO_SECURE_SSL_REDIRECT: ${DJANGO_SECURE_SSL_REDIRECT:-false}
+      DJANGO_SECURE_HSTS_SECONDS: ${DJANGO_SECURE_HSTS_SECONDS:-0}
       DATABASE_URL: postgresql://${POSTGRES_USER:-litebooks}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-litebooks}
-    command: >-
-      sh -c "python manage.py migrate &&
-             gunicorn litebooks.wsgi:application --bind 0.0.0.0:8000 --workers 3 --access-logfile -"
+      LITEBOOKS_MANAGE_PY: ${LITEBOOKS_MANAGE_PY:-manage.py}
+      LITEBOOKS_WAIT_FOR_DB: ${LITEBOOKS_WAIT_FOR_DB:-true}
+      LITEBOOKS_AUTO_MIGRATE: ${LITEBOOKS_AUTO_MIGRATE:-true}
+      LITEBOOKS_COLLECT_STATIC: ${LITEBOOKS_COLLECT_STATIC:-false}
+      LITEBOOKS_HEALTHCHECK_URL: ${LITEBOOKS_HEALTHCHECK_URL:-http://127.0.0.1:8000/}
     ports:
-      - "8000:8000"
+      - "${LITEBOOKS_PORT:-8000}:8000"
     volumes:
       - attachments:/app/media
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS \"$${LITEBOOKS_HEALTHCHECK_URL}\" >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 volumes:
   postgres_data:
   attachments:
-

@@ -20,11 +20,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 COPY --from=frontend /build/static/frontend /app/static/frontend
-RUN python manage.py collectstatic --noinput && \
+RUN chmod +x /app/docker/entrypoint.sh && \
+    python manage.py collectstatic --noinput && \
     mkdir -p /app/media && \
     chown -R litebooks:litebooks /app
 
 USER litebooks
 
 EXPOSE 8000
+ENTRYPOINT ["/app/docker/entrypoint.sh"]
 CMD ["gunicorn", "litebooks.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3", "--access-logfile", "-"]
