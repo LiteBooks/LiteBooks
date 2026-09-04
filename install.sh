@@ -279,6 +279,24 @@ compose_cmd() {
   fi
 }
 
+wait_for_migrations() {
+  local compose_file="$1"
+  local timeout="${LITEBOOKS_MIGRATE_WAIT_TIMEOUT:-180}"
+  local deadline=$((SECONDS + timeout))
+
+  log "Waiting for database migrations to finish"
+  while true; do
+    if "${COMPOSE_CMD[@]}" -f "${compose_file}" --env-file "${ENV_FILE}" exec -T web \
+        python manage.py migrate --check >/dev/null 2>&1; then
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      die "Timed out after ${timeout}s waiting for migrations. Check logs with: ${COMPOSE_CMD[*]} -f ${compose_file} logs web"
+    fi
+    sleep 3
+  done
+}
+
 run_docker_install() {
   local compose_file
   compose_file="$(find_compose_file)" || die "No Compose file found. Add compose.yml or docker-compose.yml first."
@@ -299,6 +317,7 @@ run_docker_install() {
   log "LiteBooks is starting at http://127.0.0.1:${LITEBOOKS_PORT:-8000}"
 
   if [[ "${BOOTSTRAP_OWNER}" == "true" ]]; then
+    wait_for_migrations "${compose_file}"
     log "Creating first owner login if needed"
     "${COMPOSE_CMD[@]}" -f "${compose_file}" --env-file "${ENV_FILE}" exec -T web python manage.py bootstrap_litebooks \
       --username "${ADMIN_USERNAME}" \
