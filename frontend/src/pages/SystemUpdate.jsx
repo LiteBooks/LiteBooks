@@ -165,6 +165,12 @@ export default function SystemUpdatePage() {
 
   const { current, state } = data;
   const failed = run && run.status === "failed";
+  // Verification runs last, after the image is pulled and the container is
+  // already serving, so a failure here often means the new version did land.
+  const landed = Boolean(failed && run.to_sha && run.to_sha === current.short_sha);
+  // The installed version is neither what this run started from nor what it
+  // aimed at, so the install moved on afterwards and its warning is spent.
+  const movedOn = Boolean(failed && !landed && run.from_sha && run.from_sha !== current.short_sha);
 
   return (
     <Page title="Software update" eyebrow="System" crumbs={[{ label: "Settings" }, { label: "Updates" }]}>
@@ -198,16 +204,28 @@ export default function SystemUpdatePage() {
                 <Typography variant="h2" sx={{ m: 0 }}>Update failed</Typography>
                 <Chip size="small" color="error" variant="outlined" label={STEP_LABELS[run.step] || run.step} />
               </Stack>
-              <Typography variant="body2" color="text.secondary">
-                LiteBooks was not rolled back automatically: database migrations may already have run, and reverting the
-                application without reverting the database can leave the two out of step. Use the backup below to restore if needed.
-              </Typography>
+              {landed ? (
+                <Alert severity="success" sx={{ mb: 1 }}>
+                  Your installation is already running <Mono>{run.to_sha}</Mono>. The new version was installed and is
+                  serving; only the final verification step did not confirm it, so there is nothing to restore.
+                </Alert>
+              ) : movedOn ? (
+                <Alert severity="info" sx={{ mb: 1 }}>
+                  This is a report from an earlier attempt to install <Mono>{run.to_sha}</Mono>. Your installation has
+                  changed since and now runs <Mono>{current.short_sha}</Mono>, so the warning below no longer applies.
+                </Alert>
+              ) : (
+                <Typography variant="body2" color="text.secondary">
+                  LiteBooks was not rolled back automatically: database migrations may already have run, and reverting the
+                  application without reverting the database can leave the two out of step. Use the backup below to restore if needed.
+                </Typography>
+              )}
               {run.backup_path && <Typography variant="body2" sx={{ mt: 1 }}>Pre-update backup: <Mono>{run.backup_path}</Mono></Typography>}
               <LogBlock text={run.log} />
             </Paper>
           )}
 
-          {!active && !failed && state.update_available && (
+          {!active && state.update_available && (
             <Paper variant="outlined" sx={{ p: 2.5, borderColor: "primary.main" }}>
               <Stack direction="row" spacing={1.25} alignItems="center" sx={{ mb: 1 }}>
                 <SystemUpdateAltRounded color="primary" />
@@ -228,7 +246,7 @@ export default function SystemUpdatePage() {
             </Paper>
           )}
 
-          {!active && !failed && !state.update_available && state.enabled && (
+          {!active && !state.update_available && state.enabled && (
             <Paper variant="outlined" sx={{ p: 2.5 }}>
               <Stack direction="row" spacing={1.25} alignItems="center">
                 <CheckCircleRounded color="success" />
