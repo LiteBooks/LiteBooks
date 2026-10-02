@@ -22,6 +22,9 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # Must stay first: it answers /healthz/ before anything validates the Host
+    # header, which probes reaching the container by service name would fail.
+    "ledger.middleware.HealthCheckMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",

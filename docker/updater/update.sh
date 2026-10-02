@@ -147,7 +147,7 @@ take_backup() {
 }
 
 verify_health() {
-  local expected_sha="$1" deadline response served
+  local expected_sha="$1" deadline response served code reported=""
   deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
 
   while [ "$(date +%s)" -lt "${deadline}" ]; do
@@ -159,6 +159,19 @@ verify_health() {
         return 0
       fi
       log "Waiting for the new build (health reports ${served:0:7} so far)"
+    else
+      # curl -f hides the body and the status, so an endpoint that answers but
+      # rejects us looks identical to one that is still booting. Report each
+      # distinct status once: enough to diagnose, not enough to flood the log.
+      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${HEALTH_URL}" 2>/dev/null)"
+      if [ "${code}" != "${reported}" ]; then
+        reported="${code}"
+        case "${code}" in
+          000) log "No answer yet from ${HEALTH_URL}" ;;
+          400) log "${HEALTH_URL} returned 400. If ALLOWED_HOSTS excludes this hostname, Django rejects the probe; see LITEBOOKS_HEALTH_URL." ;;
+          *)   log "${HEALTH_URL} returned HTTP ${code}" ;;
+        esac
+      fi
     fi
     sleep 3
   done
