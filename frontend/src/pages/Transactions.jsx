@@ -1,63 +1,110 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link as RouterLink, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
-  Alert, Box, Button, Chip, Divider, FormControlLabel, IconButton, Link, MenuItem, Paper, Stack,
-  Switch, TextField, Tooltip, Typography,
+  Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle, Divider,
+  FormControlLabel, IconButton, Link, MenuItem, Paper, Stack, Switch, TextField, Tooltip, Typography,
 } from "@mui/material";
 import AddRounded from "@mui/icons-material/AddRounded";
 import AttachFileRounded from "@mui/icons-material/AttachFileRounded";
 import DeleteOutlineRounded from "@mui/icons-material/DeleteOutlineRounded";
 import EditRounded from "@mui/icons-material/EditRounded";
 import PostAddRounded from "@mui/icons-material/PostAddRounded";
+import RestoreRounded from "@mui/icons-material/RestoreRounded";
 import { api, formDataFrom } from "../api";
 import { DataTable, DateField, ErrorState, fieldError, formatDate, formatMoney, FormActions, LoadingState, localToday, Page, PageLoading, useApiData } from "../components/Common";
 import { useApp } from "../context";
 
 const blankLine = () => ({ account_id: "", description: "", debit: "", credit: "", owner_id: "" });
 
+function DeleteDialog({ entry, onClose, onDeleted }) {
+  const { refreshOptions, notify } = useApp();
+  const [reason, setReason] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const remove = async () => {
+    setDeleting(true);
+    try {
+      await api(`/api/transactions/${entry.id}/`, { method: "DELETE", body: { reason } });
+      await refreshOptions();
+      notify(`Transaction ${entry.number} deleted.`);
+      onClose();
+      await onDeleted();
+    } catch (error) { notify(error.message, "error"); } finally { setDeleting(false); }
+  };
+  return (
+    <Dialog open={Boolean(entry)} onClose={onClose} fullWidth maxWidth="xs">
+      <DialogTitle>Delete {entry?.number}?</DialogTitle>
+      <DialogContent>
+        <DialogContentText>This takes the transaction off the books, so it stops counting towards every balance and report. The entry is kept in the change history and can be restored.</DialogContentText>
+        <TextField label="Reason" value={reason} onChange={(event) => setReason(event.target.value)} fullWidth sx={{ mt: 2 }} helperText="Optional. Stored with the deletion in the audit history." />
+      </DialogContent>
+      <DialogActions><Button onClick={onClose} color="inherit">Cancel</Button><Button onClick={remove} variant="contained" color="error" disabled={deleting}>Delete transaction</Button></DialogActions>
+    </Dialog>
+  );
+}
+
 export function TransactionsList() {
   const { session, options } = useApp();
   const location = useLocation();
   const initial = useMemo(() => new URLSearchParams(location.search), []);
-  const [filters, setFilters] = useState({ q: initial.get("q") || "", account: initial.get("account") || "", source: initial.get("source") || "", start: initial.get("start") || "", end: initial.get("end") || "" });
+  const [filters, setFilters] = useState({ q: initial.get("q") || "", account: initial.get("account") || "", source: initial.get("source") || "", start: initial.get("start") || "", end: initial.get("end") || "", deleted: initial.get("deleted") || "" });
   const [query, setQuery] = useState(location.search);
-  const { data, loading, error } = useApiData(`/api/transactions/${query}`, [query]);
+  const { data, loading, error, reload } = useApiData(`/api/transactions/${query}`, [query]);
+  const [confirm, setConfirm] = useState(null);
   const apply = (event) => { event.preventDefault(); const params = new URLSearchParams(Object.entries(filters).filter(([, value]) => value)); const value = params.toString() ? `?${params}` : ""; history.replaceState({}, "", `/transactions/${value}`); setQuery(value); };
-  const clear = () => { setFilters({ q: "", account: "", source: "", start: "", end: "" }); history.replaceState({}, "", "/transactions/"); setQuery(""); };
+  const clear = () => { setFilters({ q: "", account: "", source: "", start: "", end: "", deleted: "" }); history.replaceState({}, "", "/transactions/"); setQuery(""); };
   return (
     <Page title="All transactions" eyebrow="General journal" crumbs={[{ label: "Transactions" }]} actions={session.permissions.edit_books && <><Button component={RouterLink} to="/transactions/new/split/" variant="outlined" startIcon={<PostAddRounded />}>Split entry</Button><Button component={RouterLink} to="/transactions/new/" variant="contained" startIcon={<AddRounded />}>New transaction</Button></>}>
       <Paper component="form" variant="outlined" onSubmit={apply} sx={{ p: 2, mb: 2 }}>
-        <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "minmax(220px, 1.5fr) 1fr", lg: "minmax(240px, 1.4fr) repeat(4, minmax(130px, .7fr)) auto" }, gap: 1.5, alignItems: "center" }}>
+        <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "minmax(220px, 1.5fr) 1fr", lg: "minmax(240px, 1.4fr) repeat(5, minmax(130px, .7fr)) auto" }, gap: 1.5, alignItems: "center" }}>
           <TextField label="Search" value={filters.q} onChange={(event) => setFilters({ ...filters, q: event.target.value })} placeholder="Number, description, or contact" />
           <TextField select label="Account" value={filters.account} onChange={(event) => setFilters({ ...filters, account: event.target.value })}><MenuItem value="">All accounts</MenuItem>{options?.accounts.map((item) => <MenuItem key={item.id} value={item.id}>{item.display_name}</MenuItem>)}</TextField>
           <TextField select label="Source" value={filters.source} onChange={(event) => setFilters({ ...filters, source: event.target.value })}><MenuItem value="">All sources</MenuItem>{options?.choices.entry_sources.map((item) => <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>)}</TextField>
           <DateField label="From" value={filters.start} onChange={(value) => setFilters({ ...filters, start: value })} />
           <DateField label="Through" value={filters.end} onChange={(value) => setFilters({ ...filters, end: value })} />
+          <TextField select label="Deleted" value={filters.deleted} onChange={(event) => setFilters({ ...filters, deleted: event.target.value })}><MenuItem value="">Hidden</MenuItem><MenuItem value="only">Deleted only</MenuItem><MenuItem value="all">Included</MenuItem></TextField>
           <Stack direction="row" spacing={1}><Button type="submit" variant="outlined">Filter</Button><Button onClick={clear} color="inherit">Clear</Button></Stack>
         </Box>
       </Paper>
       {loading ? <LoadingState /> : error ? <ErrorState error={error} /> : <DataTable rows={data.entries} emptyTitle="No matching transactions" columns={[
         { key: "date", label: "Date", render: (row) => formatDate(row.date) },
-        { key: "number", label: "Entry", render: (row) => <Box><Link component={RouterLink} to={`/transactions/${row.id}/`} fontWeight={700}>{row.number}</Link>{row.version > 1 && <Typography variant="caption" color="text.secondary" display="block">Version {row.version}</Typography>}</Box> },
+        { key: "number", label: "Entry", render: (row) => <Box><Link component={RouterLink} to={`/transactions/${row.id}/`} fontWeight={700}>{row.number}</Link>{row.version > 1 && <Typography variant="caption" color="text.secondary" display="block">Version {row.version}</Typography>}{row.is_deleted && <Chip size="small" label="Deleted" color="error" variant="outlined" sx={{ mt: 0.25 }} />}</Box> },
         { key: "description", label: "Description", sx: { minWidth: 220 }, render: (row) => <Box><Typography variant="body2">{row.description}</Typography>{row.linked_entry && <Typography variant="caption" color="text.secondary">Linked to {row.linked_entry.number}</Typography>}</Box> },
         { key: "accounts", label: "Accounts", sx: { minWidth: 170 }, render: (row) => <Stack>{row.accounts.map((name, index) => <Typography key={`${name}-${index}`} variant="caption" color="text.secondary">{name}</Typography>)}</Stack> },
         { key: "contact", label: "Contact", render: (row) => row.contact?.name || "—" },
         { key: "source", label: "Source", render: (row) => <Chip size="small" label={row.source_label} variant="outlined" /> },
-        { key: "total", label: "Amount", align: "right", render: (row) => <Typography fontWeight={600} sx={{ fontVariantNumeric: "tabular-nums" }}>{formatMoney(row.total)}</Typography> },
+        { key: "total", label: "Amount", align: "right", render: (row) => <Typography fontWeight={600} color={row.is_deleted ? "text.disabled" : "text.primary"} sx={{ fontVariantNumeric: "tabular-nums", textDecoration: row.is_deleted ? "line-through" : "none" }}>{formatMoney(row.total)}</Typography> },
+        ...(session.permissions.edit_books ? [{ key: "actions", label: "", align: "right", render: (row) => row.can_delete && <Tooltip title="Delete transaction"><IconButton size="small" aria-label={`Delete ${row.number}`} onClick={() => setConfirm(row)}><DeleteOutlineRounded fontSize="small" /></IconButton></Tooltip> }] : []),
       ]} />}
+      {confirm && <DeleteDialog entry={confirm} onClose={() => setConfirm(null)} onDeleted={reload} />}
     </Page>
   );
 }
 
 export function TransactionDetail() {
   const { id } = useParams();
-  const { session } = useApp();
-  const { data, loading, error } = useApiData(`/api/transactions/${id}/`, [id]);
+  const { session, refreshOptions, notify } = useApp();
+  const { data, loading, error, reload } = useApiData(`/api/transactions/${id}/`, [id]);
+  const [confirm, setConfirm] = useState(false);
+  const [restoring, setRestoring] = useState(false);
   if (loading) return <PageLoading title="Transaction" />;
   if (error) return <Page title="Transaction" crumbs={[{ label: "Transactions", to: "/transactions/" }, { label: "Unavailable" }]}><ErrorState error={error} /></Page>;
   const entry = data.entry;
+  const restore = async () => {
+    setRestoring(true);
+    try {
+      await api(`/api/transactions/${entry.id}/restore/`, { method: "POST" });
+      await refreshOptions();
+      notify(`Transaction ${entry.number} restored.`);
+      await reload();
+    } catch (restoreError) { notify(restoreError.message, "error"); } finally { setRestoring(false); }
+  };
   return (
-    <Page title={entry.number} eyebrow={`${entry.source_label} · ${entry.status}`} subtitle={entry.description} crumbs={[{ label: "Transactions", to: "/transactions/" }, { label: entry.number }]} actions={session.permissions.edit_books && entry.can_edit && <Button component={RouterLink} to={`/transactions/${entry.id}/edit/`} variant="outlined" startIcon={<EditRounded />}>Edit transaction</Button>}>
+    <Page title={entry.number} eyebrow={`${entry.source_label} · ${entry.status_label}`} subtitle={entry.description} crumbs={[{ label: "Transactions", to: "/transactions/" }, { label: entry.number }]} actions={session.permissions.edit_books && <>
+      {entry.can_edit && <Button component={RouterLink} to={`/transactions/${entry.id}/edit/`} variant="outlined" startIcon={<EditRounded />}>Edit transaction</Button>}
+      {entry.can_delete && <Button color="error" variant="outlined" startIcon={<DeleteOutlineRounded />} onClick={() => setConfirm(true)}>Delete</Button>}
+      {entry.is_deleted && <Button variant="contained" startIcon={<RestoreRounded />} disabled={restoring} onClick={restore}>Restore</Button>}
+    </>}>
+      {entry.is_deleted && <Alert severity="warning" sx={{ mb: 3 }}>This transaction was deleted{entry.deleted_by && ` by ${entry.deleted_by}`} on {formatDate(entry.deleted_at, { month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}. It is kept for the record but no longer affects any balance or report.{entry.deleted_reason && <Box component="span" sx={{ display: "block", mt: 0.5 }}>Reason: {entry.deleted_reason}</Box>}</Alert>}
       <Paper variant="outlined" sx={{ mb: 3 }}><Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "repeat(2, 1fr)", lg: "repeat(4, 1fr)" } }}>{[
         ["Date", formatDate(entry.date, { month: "long", day: "numeric", year: "numeric" })], ["Contact", entry.contact?.name || "—"], ["Version", entry.version], ["Created by", entry.created_by],
       ].map(([label, value], index) => <Box key={label} sx={{ p: 2, borderRight: { lg: index < 3 ? 1 : 0 }, borderBottom: { xs: index < 3 ? 1 : 0, lg: 0 }, borderColor: "divider" }}><Typography variant="overline" color="text.secondary">{label}</Typography><Typography>{value}</Typography></Box>)}</Box></Paper>
@@ -73,6 +120,7 @@ export function TransactionDetail() {
       ]} />
       {entry.attachments.length > 0 && <Box sx={{ mt: 3 }}><Typography variant="h2" sx={{ mb: 1.5 }}>Attachments</Typography><Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">{entry.attachments.map((item) => <Button key={item.id} component="a" href={item.download_url} variant="outlined" startIcon={<AttachFileRounded />}>{item.name}</Button>)}</Stack></Box>}
       {data.audits.length > 0 && <Box sx={{ mt: 3 }}><Typography variant="h2" sx={{ mb: 1.5 }}>Change history</Typography><Stack divider={<Divider flexItem />} component={Paper} variant="outlined">{data.audits.map((item) => <Stack key={item.id} direction={{ xs: "column", sm: "row" }} justifyContent="space-between" sx={{ p: 1.5 }}><Typography fontWeight={600} textTransform="capitalize">{item.action}</Typography><Typography variant="body2" color="text.secondary">{formatDate(item.created_at)} by {item.actor}</Typography></Stack>)}</Stack></Box>}
+      {confirm && <DeleteDialog entry={entry} onClose={() => setConfirm(false)} onDeleted={reload} />}
     </Page>
   );
 }

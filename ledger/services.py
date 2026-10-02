@@ -58,6 +58,7 @@ def entry_snapshot(entry):
         "memo": entry.memo,
         "status": entry.status,
         "source": entry.source,
+        "deleted_reason": entry.deleted_reason,
         "contact_id": entry.contact_id,
         "linked_entry_id": entry.linked_entry_id,
         "version": entry.version,
@@ -83,6 +84,15 @@ def record_audit(actor, action, instance, before=None, after=None):
         before=before or {},
         after=after or {},
     )
+
+
+def source_managed(entry):
+    return hasattr(entry, "business_document") or hasattr(entry, "payment") or hasattr(entry, "owner_activity")
+
+
+def can_delete_entry(entry):
+    """Cheap enough to call for every row of a listing: no queries, just the source."""
+    return entry.source == JournalEntry.Source.GENERAL and not entry.is_deleted
 
 
 def validate_entry(entry):
@@ -131,8 +141,10 @@ def create_entry(*, entry_date, description, lines, user, memo="", contact=None,
 
 @transaction.atomic
 def update_entry(*, entry, entry_date, description, lines, user, memo="", contact=None, linked_entry=None, attachment=None):
-    if hasattr(entry, "business_document") or hasattr(entry, "payment") or hasattr(entry, "owner_activity"):
+    if source_managed(entry):
         raise PostingError("This entry is managed by its source document and cannot be edited here.")
+    if entry.is_deleted:
+        raise PostingError("This transaction is deleted. Restore it before editing it.")
     ensure_period_open(entry.date)
     ensure_period_open(entry_date)
     if not description.strip():
@@ -156,6 +168,46 @@ def update_entry(*, entry, entry_date, description, lines, user, memo="", contac
     if attachment:
         add_attachment(entry, attachment, user)
     record_audit(user, "updated", entry, before=before, after=entry_snapshot(entry))
+    return entry
+
+
+@transaction.atomic
+def delete_entry(*, entry, user, reason=""):
+    """Take an entry off the books without losing it.
+
+    The row, its lines, and its attachments all stay put: the entry moves to the
+    deleted status, which every balance, register, and report already filters out
+    because they only count posted entries. That keeps the deletion reversible and
+    leaves the numbered entry in the history where an auditor expects to find it.
+    """
+    if entry.is_deleted:
+        raise PostingError("This transaction has already been deleted.")
+    if not can_delete_entry(entry) or source_managed(entry):
+        raise PostingError("Only general journal transactions can be deleted here. Delete this one from the document it belongs to.")
+    ensure_period_open(entry.date)
+    before = entry_snapshot(entry)
+    entry.status = JournalEntry.Status.DELETED
+    entry.deleted_by = user
+    entry.deleted_at = timezone.now()
+    entry.deleted_reason = (reason or "").strip()[:240]
+    entry.save(update_fields=["status", "deleted_by", "deleted_at", "deleted_reason", "updated_at"])
+    record_audit(user, "deleted", entry, before=before, after=entry_snapshot(entry))
+    return entry
+
+
+@transaction.atomic
+def restore_entry(*, entry, user):
+    if not entry.is_deleted:
+        raise PostingError("This transaction is not deleted.")
+    ensure_period_open(entry.date)
+    before = entry_snapshot(entry)
+    entry.status = JournalEntry.Status.POSTED
+    entry.deleted_by = None
+    entry.deleted_at = None
+    entry.deleted_reason = ""
+    validate_entry(entry)
+    entry.save(update_fields=["status", "deleted_by", "deleted_at", "deleted_reason", "updated_at"])
+    record_audit(user, "restored", entry, before=before, after=entry_snapshot(entry))
     return entry
 
 

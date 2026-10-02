@@ -11,7 +11,7 @@ from openpyxl import load_workbook
 
 from ledger.models import Account, AccountingPeriod, AuditEvent, BusinessDocument, Contact, JournalEntry, UserProfile
 from ledger.reporting import balance_sheet, owner_balances, trial_balance
-from ledger.services import create_document, create_entry, create_owner_activity, create_payment, update_entry
+from ledger.services import create_document, create_entry, create_owner_activity, create_payment, delete_entry, restore_entry, update_entry
 
 
 class AccountingTestCase(TestCase):
@@ -81,6 +81,97 @@ class AccountingTestCase(TestCase):
                 entry=entry, entry_date=entry.date, description="Changed", user=self.user,
                 lines=[{"account": self.bank, "debit": 100, "credit": 0, "owner": None}, {"account": self.sales, "debit": 0, "credit": 100, "owner": None}],
             )
+
+    def sale(self, entry_date=date(2026, 7, 1), amount=200, description="Sale"):
+        return create_entry(
+            entry_date=entry_date, description=description, user=self.user,
+            lines=[{"account": self.bank, "debit": amount, "credit": 0, "owner": None}, {"account": self.sales, "debit": 0, "credit": amount, "owner": None}],
+        )
+
+    def test_deleted_entry_leaves_the_books_but_keeps_its_history(self):
+        entry = self.sale()
+        before = trial_balance(date(2026, 7, 31))[1]
+        delete_entry(entry=entry, user=self.user, reason="Duplicate of an earlier sale")
+        entry.refresh_from_db()
+        self.assertTrue(entry.is_deleted)
+        self.assertEqual(entry.deleted_by, self.user)
+        self.assertEqual(entry.deleted_reason, "Duplicate of an earlier sale")
+        self.assertEqual(trial_balance(date(2026, 7, 31))[1], before - Decimal("200"))
+        self.assertEqual(entry.lines.count(), 2)
+        audit = AuditEvent.objects.get(object_id=str(entry.pk), action="deleted")
+        self.assertEqual(audit.before["status"], JournalEntry.Status.POSTED)
+        self.assertEqual(audit.after["deleted_reason"], "Duplicate of an earlier sale")
+        self.assertEqual(len(audit.before["lines"]), 2)
+
+    def test_deleted_entry_can_be_restored_to_the_books(self):
+        entry = self.sale()
+        posted = trial_balance(date(2026, 7, 31))[1]
+        delete_entry(entry=entry, user=self.user)
+        restore_entry(entry=entry, user=self.user)
+        entry.refresh_from_db()
+        self.assertEqual(entry.status, JournalEntry.Status.POSTED)
+        self.assertIsNone(entry.deleted_at)
+        self.assertEqual(entry.deleted_by, None)
+        self.assertEqual(trial_balance(date(2026, 7, 31))[1], posted)
+        self.assertTrue(AuditEvent.objects.filter(object_id=str(entry.pk), action="restored").exists())
+
+    def test_deleted_entry_cannot_be_edited_or_deleted_twice(self):
+        entry = self.sale()
+        delete_entry(entry=entry, user=self.user)
+        with self.assertRaises(ValidationError):
+            delete_entry(entry=entry, user=self.user)
+        with self.assertRaises(ValidationError):
+            update_entry(
+                entry=entry, entry_date=entry.date, description="Changed", user=self.user,
+                lines=[{"account": self.bank, "debit": 200, "credit": 0, "owner": None}, {"account": self.sales, "debit": 0, "credit": 200, "owner": None}],
+            )
+
+    def test_closed_period_rejects_deletion_and_restore(self):
+        entry = self.sale(entry_date=date(2026, 8, 3))
+        AccountingPeriod.objects.create(year=2026, month=8, closed_at=timezone.now(), closed_by=self.user)
+        with self.assertRaises(ValidationError):
+            delete_entry(entry=entry, user=self.user)
+        entry.refresh_from_db()
+        self.assertEqual(entry.status, JournalEntry.Status.POSTED)
+
+    def test_document_entry_cannot_be_deleted_as_a_transaction(self):
+        invoice = create_document(
+            kind=BusinessDocument.Kind.INVOICE, number="INV-900", contact=self.customer,
+            issue_date=date(2026, 9, 1), due_date=date(2026, 10, 1), description="Services", amount=Decimal("300"),
+            control_account=self.ar, category_account=self.sales, user=self.user,
+        )
+        with self.assertRaises(ValidationError):
+            delete_entry(entry=invoice.journal_entry, user=self.user)
+
+    def test_delete_api_hides_the_entry_from_the_default_listing(self):
+        entry = self.sale(entry_date=date(2026, 10, 5), description="API delete")
+        self.client.force_login(self.user)
+        response = self.client.delete(
+            reverse("api-transaction", args=[entry.pk]),
+            data={"reason": "Posted in error"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["entry"]["is_deleted"])
+        listed = self.client.get(reverse("api-transactions")).json()["entries"]
+        self.assertNotIn(entry.pk, [item["id"] for item in listed])
+        only_deleted = self.client.get(reverse("api-transactions"), {"deleted": "only"}).json()["entries"]
+        self.assertEqual([item["id"] for item in only_deleted], [entry.pk])
+        detail = self.client.get(reverse("api-transaction", args=[entry.pk])).json()
+        self.assertEqual(detail["entry"]["deleted_reason"], "Posted in error")
+        self.assertFalse(detail["entry"]["can_edit"])
+        restored = self.client.post(reverse("api-transaction-restore", args=[entry.pk]))
+        self.assertEqual(restored.status_code, 200)
+        self.assertFalse(restored.json()["entry"]["is_deleted"])
+
+    def test_viewer_cannot_delete_a_transaction(self):
+        entry = self.sale(entry_date=date(2026, 11, 2))
+        viewer = get_user_model().objects.create_user(username="viewer-delete", password="very-good-password")
+        self.client.force_login(viewer)
+        self.assertEqual(self.client.delete(reverse("api-transaction", args=[entry.pk])).status_code, 403)
+        self.assertEqual(self.client.post(reverse("api-transaction-restore", args=[entry.pk])).status_code, 403)
+        entry.refresh_from_db()
+        self.assertEqual(entry.status, JournalEntry.Status.POSTED)
 
     def test_invoice_and_payment_link_to_original_entry(self):
         invoice = create_document(

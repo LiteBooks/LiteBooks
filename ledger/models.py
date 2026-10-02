@@ -164,6 +164,7 @@ class JournalEntry(TimeStampedModel):
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"
         POSTED = "posted", "Posted"
+        DELETED = "deleted", "Deleted"
 
     class Source(models.TextChoices):
         GENERAL = "general", "General"
@@ -184,6 +185,9 @@ class JournalEntry(TimeStampedModel):
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="entries_created")
     posted_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.PROTECT, related_name="entries_posted")
     posted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.PROTECT, related_name="entries_deleted")
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_reason = models.CharField(max_length=240, blank=True)
     version = models.PositiveIntegerField(default=1)
 
     class Meta:
@@ -195,6 +199,10 @@ class JournalEntry(TimeStampedModel):
     @property
     def total(self):
         return self.lines.aggregate(total=models.Sum("debit"))["total"] or Decimal("0.00")
+
+    @property
+    def is_deleted(self):
+        return self.status == self.Status.DELETED
 
     @property
     def is_balanced(self):

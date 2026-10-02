@@ -17,7 +17,7 @@ from .forms import AccountForm, AccountingPeriodForm, BusinessDocumentForm, Cont
 from .models import Account, AccountingPeriod, AuditEvent, BusinessDocument, Contact, JournalEntry, JournalLine, OwnerActivity, UserProfile
 from .permissions import ROLE_LEVEL, user_role
 from .reporting import account_rows, aging, balance_sheet, income_statement, owner_balances, trial_balance
-from .services import create_document, create_entry, create_owner_activity, create_payment, record_audit, update_entry
+from .services import can_delete_entry, create_document, create_entry, create_owner_activity, create_payment, delete_entry, record_audit, restore_entry, update_entry
 from . import updates
 
 
@@ -133,13 +133,19 @@ def entry_json(entry, detail=False):
         "description": entry.description,
         "memo": entry.memo,
         "status": entry.status,
+        "status_label": entry.get_status_display(),
         "source": entry.source,
         "source_label": entry.get_source_display(),
         "contact": contact_json(entry.contact) if entry.contact else None,
         "linked_entry": {"id": entry.linked_entry_id, "number": entry.linked_entry.number} if entry.linked_entry else None,
         "total": money(sum((line.debit for line in lines), Decimal("0.00"))),
         "version": entry.version,
-        "can_edit": entry.source == JournalEntry.Source.GENERAL,
+        "can_edit": entry.source == JournalEntry.Source.GENERAL and not entry.is_deleted,
+        "can_delete": can_delete_entry(entry),
+        "is_deleted": entry.is_deleted,
+        "deleted_at": entry.deleted_at.isoformat() if entry.deleted_at else None,
+        "deleted_by": (entry.deleted_by.get_full_name() or entry.deleted_by.username) if entry.deleted_by else "",
+        "deleted_reason": entry.deleted_reason,
         "accounts": [line.account.name for line in lines],
     }
     if detail:
@@ -313,6 +319,11 @@ def parse_lines(data):
 def transactions_api(request):
     if request.method == "GET":
         entries = JournalEntry.objects.select_related("contact", "linked_entry").prefetch_related("lines__account")
+        deleted = request.GET.get("deleted", "")
+        if deleted == "only":
+            entries = entries.filter(status=JournalEntry.Status.DELETED)
+        elif deleted != "all":
+            entries = entries.exclude(status=JournalEntry.Status.DELETED)
         query = request.GET.get("q", "").strip()
         if query:
             entries = entries.filter(Q(number__icontains=query) | Q(description__icontains=query) | Q(memo__icontains=query) | Q(contact__name__icontains=query)).distinct()
@@ -350,14 +361,17 @@ def transactions_api(request):
     return JsonResponse({"entry": entry_json(entry, detail=True)}, status=201)
 
 
-@api_view(methods=("GET", "POST"))
+@api_view(methods=("GET", "POST", "DELETE"))
 def transaction_api(request, pk):
-    entry = get_object_or_404(JournalEntry.objects.select_related("contact", "linked_entry", "created_by", "posted_by").prefetch_related("lines__account", "lines__owner", "attachments"), pk=pk)
+    entry = get_object_or_404(JournalEntry.objects.select_related("contact", "linked_entry", "created_by", "posted_by", "deleted_by").prefetch_related("lines__account", "lines__owner", "attachments"), pk=pk)
     if request.method == "GET":
         audits = AuditEvent.objects.filter(object_type="ledger.JournalEntry", object_id=str(pk))
         return JsonResponse({"entry": entry_json(entry, detail=True), "audits": [audit_json(item) for item in audits]})
     if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.BOOKKEEPER]:
         return JsonResponse({"error": "You do not have permission to edit transactions."}, status=403)
+    if request.method == "DELETE":
+        entry = delete_entry(entry=entry, user=request.user, reason=request_data(request).get("reason", ""))
+        return JsonResponse({"entry": entry_json(entry, detail=True)})
     data = request_data(request)
     entry = update_entry(
         entry=entry,
@@ -370,6 +384,13 @@ def transaction_api(request, pk):
         user=request.user,
         lines=parse_lines(data),
     )
+    return JsonResponse({"entry": entry_json(entry, detail=True)})
+
+
+@api_view(methods=("POST",), minimum_role=UserProfile.Role.BOOKKEEPER)
+def transaction_restore_api(request, pk):
+    entry = get_object_or_404(JournalEntry.objects.select_related("contact", "linked_entry", "created_by", "posted_by", "deleted_by").prefetch_related("lines__account", "lines__owner", "attachments"), pk=pk)
+    entry = restore_entry(entry=entry, user=request.user)
     return JsonResponse({"entry": entry_json(entry, detail=True)})
 
 

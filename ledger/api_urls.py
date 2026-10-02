@@ -12,6 +12,7 @@ urlpatterns = [
     path("dashboard/", api.dashboard_api, name="api-dashboard"),
     path("transactions/", api.transactions_api, name="api-transactions"),
     path("transactions/<int:pk>/", api.transaction_api, name="api-transaction"),
+    path("transactions/<int:pk>/restore/", api.transaction_restore_api, name="api-transaction-restore"),
     path("accounts/", api.accounts_api, name="api-accounts"),
     path("accounts/<int:pk>/", api.account_api, name="api-account"),
     path("contacts/", api.contacts_api, name="api-contacts"),
