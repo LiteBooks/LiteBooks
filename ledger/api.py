@@ -5,8 +5,8 @@ from functools import wraps
 
 from django.contrib.auth import authenticate, get_user_model, login, logout, update_session_auth_hash
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
-from django.db import IntegrityError
-from django.db.models import Q, Sum
+from django.db import IntegrityError, transaction
+from django.db.models import ProtectedError, Q, Sum
 from django.http import JsonResponse
 from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
@@ -568,11 +568,33 @@ def users_api(request):
     return JsonResponse({"id": user.pk}, status=201)
 
 
-@api_view(methods=("GET", "POST"), minimum_role=UserProfile.Role.ADMIN)
+def delete_user(request, user):
+    """Permanently remove a login, refusing when that would break the books.
+
+    Refusing self-deletion plus the role check below is what keeps the last
+    owner reachable: deleting an owner takes an owner, who cannot be the target.
+    """
+    if user == request.user:
+        return JsonResponse({"error": "You cannot delete your own login."}, status=400)
+    if ROLE_LEVEL[user_role(user)] > ROLE_LEVEL[user_role(request.user)]:
+        return JsonResponse({"error": "You cannot delete a login with a higher role than your own."}, status=403)
+    snapshot = {"username": user.username, "role": user.profile.role, "is_active": user.is_active}
+    try:
+        with transaction.atomic():
+            record_audit(request.user, "deleted", user.profile, before=snapshot)
+            user.delete()
+    except ProtectedError:
+        return JsonResponse({"error": "This user is referenced by existing bookkeeping records and cannot be deleted. Deactivate the login instead."}, status=409)
+    return JsonResponse({"ok": True})
+
+
+@api_view(methods=("GET", "POST", "DELETE"), minimum_role=UserProfile.Role.ADMIN)
 def user_api(request, pk):
     user = get_object_or_404(get_user_model().objects.select_related("profile"), pk=pk)
     if request.method == "GET":
         return JsonResponse({"user": {"id": user.pk, "username": user.username, "first_name": user.first_name, "last_name": user.last_name, "role": user.profile.role, "is_active": user.is_active}})
+    if request.method == "DELETE":
+        return delete_user(request, user)
     before = {"role": user.profile.role, "is_active": user.is_active}
     form = UserUpdateForm(request_data(request), instance=user)
     if not form.is_valid():

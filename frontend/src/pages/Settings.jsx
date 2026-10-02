@@ -5,6 +5,7 @@ import {
   FormControlLabel, MenuItem, Paper, Stack, Switch, TextField, Typography,
 } from "@mui/material";
 import AddRounded from "@mui/icons-material/AddRounded";
+import DeleteOutlineRounded from "@mui/icons-material/DeleteOutlineRounded";
 import EditRounded from "@mui/icons-material/EditRounded";
 import LockOpenRounded from "@mui/icons-material/LockOpenRounded";
 import LockRounded from "@mui/icons-material/LockRounded";
@@ -42,12 +43,15 @@ export function PeriodsPage() {
 }
 
 export function UsersPage() {
-  const { options, notify } = useApp();
+  const { options, notify, session } = useApp();
   const { data, loading, error, reload } = useApiData("/api/users/", []);
   const [values, setValues] = useState({ username: "", first_name: "", last_name: "", role: "viewer", password: "", is_active: true });
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
+  const [confirm, setConfirm] = useState(null);
+  const [deleting, setDeleting] = useState(false);
   const set = (key) => (event) => setValues({ ...values, [key]: event.target.value });
+  const remove = async () => { setDeleting(true); try { await api(`/api/users/${confirm.id}/`, { method: "DELETE" }); notify(`${confirm.username} deleted.`); setConfirm(null); await reload(); } catch (error) { notify(error.message, "error"); } finally { setDeleting(false); } };
   const submit = async (event) => { event.preventDefault(); setSaving(true); setErrors({}); try { await api("/api/users/", { method: "POST", body: values }); notify("User created."); setValues({ username: "", first_name: "", last_name: "", role: "viewer", password: "", is_active: true }); await reload(); } catch (error) { setErrors({ ...(error.fields || {}), __all__: error.message }); } finally { setSaving(false); } };
   return (
     <Page title="Users" eyebrow="Access control" crumbs={[{ label: "Settings" }, { label: "Users" }]}>
@@ -55,10 +59,11 @@ export function UsersPage() {
         <Box>{loading ? <LoadingState /> : error ? <ErrorState error={error} /> : <DataTable rows={data.users} columns={[
           { key: "username", label: "Username", render: (row) => <Typography fontWeight={700}>{row.username}</Typography> }, { key: "name", label: "Name", render: (row) => row.name || "—" },
           { key: "role", label: "Role", render: (row) => <Chip size="small" label={row.role_label} variant="outlined" /> }, { key: "status", label: "Status", render: (row) => row.is_active ? "Active" : "Inactive" },
-          { key: "actions", label: "", align: "right", render: (row) => <Button component={RouterLink} to={`/settings/users/${row.id}/edit/`} size="small" startIcon={<EditRounded />}>Edit</Button> },
+          { key: "actions", label: "", align: "right", render: (row) => <Stack direction="row" spacing={1} justifyContent="flex-end"><Button component={RouterLink} to={`/settings/users/${row.id}/edit/`} size="small" startIcon={<EditRounded />}>Edit</Button><Button size="small" color="error" startIcon={<DeleteOutlineRounded />} disabled={row.id === session?.user?.id} onClick={() => setConfirm(row)}>Delete</Button></Stack> },
         ]} />}</Box>
         <Paper component="form" onSubmit={submit} variant="outlined" sx={{ p: 2.5 }}><Typography variant="h2" sx={{ mb: 2 }}>New user</Typography>{errors.__all__ && <Alert severity="error" sx={{ mb: 2 }}>{errors.__all__}</Alert>}<Stack spacing={2}><TextField required label="Username" value={values.username} onChange={set("username")} error={Boolean(fieldError(errors, "username"))} helperText={fieldError(errors, "username")} /><TextField label="First name" value={values.first_name} onChange={set("first_name")} /><TextField label="Last name" value={values.last_name} onChange={set("last_name")} /><TextField required select label="Role" value={values.role} onChange={set("role")}>{options?.choices.roles.map((item) => <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>)}</TextField><TextField required type="password" label="Temporary password" value={values.password} onChange={set("password")} error={Boolean(fieldError(errors, "password"))} helperText={fieldError(errors, "password") || "At least 8 characters"} /><FormControlLabel control={<Switch checked={values.is_active} onChange={(event) => setValues({ ...values, is_active: event.target.checked })} />} label="Active login" /><Button type="submit" variant="contained" disabled={saving}>Create user</Button></Stack></Paper>
       </Box>
+      <Dialog open={Boolean(confirm)} onClose={() => setConfirm(null)}><DialogTitle>Delete {confirm?.username}?</DialogTitle><DialogContent><DialogContentText>This permanently removes the login. Users who have already posted transactions cannot be deleted — deactivate them instead.</DialogContentText></DialogContent><DialogActions><Button onClick={() => setConfirm(null)} color="inherit">Cancel</Button><Button onClick={remove} variant="contained" color="error" disabled={deleting}>Delete user</Button></DialogActions></Dialog>
     </Page>
   );
 }
@@ -66,20 +71,31 @@ export function UsersPage() {
 export function UserEditPage() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { options, notify, refreshSession } = useApp();
+  const { options, notify, refreshSession, session } = useApp();
   const detail = useApiData(`/api/users/${id}/`, [id]);
   const [values, setValues] = useState({ first_name: "", last_name: "", role: "viewer", is_active: true });
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   useEffect(() => { if (detail.data?.user) { const item = detail.data.user; setValues({ first_name: item.first_name, last_name: item.last_name, role: item.role, is_active: item.is_active }); } }, [detail.data]);
   if (detail.loading) return <PageLoading title="Edit user" />;
   if (detail.error) return <Page title="Edit user"><ErrorState error={detail.error} /></Page>;
   const item = detail.data.user;
   const set = (key) => (event) => setValues({ ...values, [key]: event.target.value });
   const submit = async (event) => { event.preventDefault(); setSaving(true); setErrors({}); try { await api(`/api/users/${id}/`, { method: "POST", body: values }); await refreshSession(); notify("User updated."); navigate("/settings/users/"); } catch (error) { setErrors({ ...(error.fields || {}), __all__: error.message }); } finally { setSaving(false); } };
+  const remove = async () => { setDeleting(true); try { await api(`/api/users/${id}/`, { method: "DELETE" }); notify(`${item.username} deleted.`); navigate("/settings/users/"); } catch (error) { notify(error.message, "error"); setConfirm(false); } finally { setDeleting(false); } };
   return (
     <Page title={`Edit ${item.username}`} eyebrow="Access control" crumbs={[{ label: "Settings" }, { label: "Users", to: "/settings/users/" }, { label: item.username }]}>
       <Paper component="form" onSubmit={submit} variant="outlined" sx={{ p: { xs: 2, sm: 3 }, maxWidth: 650 }}>{errors.__all__ && <Alert severity="error" sx={{ mb: 2 }}>{errors.__all__}</Alert>}<Stack spacing={2}><TextField label="Username" value={item.username} disabled /><TextField label="First name" value={values.first_name} onChange={set("first_name")} /><TextField label="Last name" value={values.last_name} onChange={set("last_name")} /><TextField required select label="Role" value={values.role} onChange={set("role")}>{options?.choices.roles.map((option) => <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>)}</TextField><FormControlLabel control={<Switch checked={values.is_active} onChange={(event) => setValues({ ...values, is_active: event.target.checked })} />} label="Active login" /></Stack><FormActions saving={saving} submitLabel="Save user" cancelTo="/settings/users/" /></Paper>
+      {item.id !== session?.user?.id && (
+        <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 }, mt: 3, maxWidth: 650, borderColor: "error.light" }}>
+          <Typography variant="h2" sx={{ mb: 1 }}>Delete this user</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Removing the login is permanent. If this user has posted transactions, deactivate them above instead.</Typography>
+          <Button color="error" variant="outlined" startIcon={<DeleteOutlineRounded />} onClick={() => setConfirm(true)}>Delete {item.username}</Button>
+        </Paper>
+      )}
+      <Dialog open={confirm} onClose={() => setConfirm(false)}><DialogTitle>Delete {item.username}?</DialogTitle><DialogContent><DialogContentText>This permanently removes the login and cannot be undone.</DialogContentText></DialogContent><DialogActions><Button onClick={() => setConfirm(false)} color="inherit">Cancel</Button><Button onClick={remove} variant="contained" color="error" disabled={deleting}>Delete user</Button></DialogActions></Dialog>
     </Page>
   );
 }
