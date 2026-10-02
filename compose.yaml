@@ -1,3 +1,5 @@
+name: litebooks
+
 services:
   db:
     image: postgres:17-alpine
@@ -15,7 +17,7 @@ services:
       retries: 10
 
   web:
-    build: .
+    image: ${LITEBOOKS_UPDATE_IMAGE:-ghcr.io/litebooks/litebooks}:${LITEBOOKS_TAG:-main}
     restart: unless-stopped
     environment:
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?Set DJANGO_SECRET_KEY in .env}
@@ -31,11 +33,19 @@ services:
       LITEBOOKS_WAIT_FOR_DB: ${LITEBOOKS_WAIT_FOR_DB:-true}
       LITEBOOKS_AUTO_MIGRATE: ${LITEBOOKS_AUTO_MIGRATE:-true}
       LITEBOOKS_COLLECT_STATIC: ${LITEBOOKS_COLLECT_STATIC:-false}
-      LITEBOOKS_HEALTHCHECK_URL: ${LITEBOOKS_HEALTHCHECK_URL:-http://127.0.0.1:8000/}
+      LITEBOOKS_HEALTHCHECK_URL: ${LITEBOOKS_HEALTHCHECK_URL:-http://127.0.0.1:8000/healthz/}
+      LITEBOOKS_UPDATES_ENABLED: ${LITEBOOKS_UPDATES_ENABLED:-true}
+      LITEBOOKS_UPDATE_REPO: ${LITEBOOKS_UPDATE_REPO:-LiteBooks/LiteBooks}
+      LITEBOOKS_UPDATE_BRANCH: ${LITEBOOKS_UPDATE_BRANCH:-main}
+      LITEBOOKS_UPDATE_IMAGE: ${LITEBOOKS_UPDATE_IMAGE:-ghcr.io/litebooks/litebooks}
+      LITEBOOKS_UPDATE_CHECK_INTERVAL: ${LITEBOOKS_UPDATE_CHECK_INTERVAL:-86400}
+      LITEBOOKS_UPDATE_STATE_DIR: /state
+      LITEBOOKS_GITHUB_TOKEN: ${LITEBOOKS_GITHUB_TOKEN:-}
     ports:
       - "${LITEBOOKS_PORT:-8000}:8000"
     volumes:
       - attachments:/app/media
+      - update_state:/state
     depends_on:
       db:
         condition: service_healthy
@@ -46,6 +56,29 @@ services:
       retries: 5
       start_period: 30s
 
+  # Performs the privileged half of an in-app update: the web container runs
+  # unprivileged and cannot pull images or restart containers. Remove this
+  # service (and set LITEBOOKS_UPDATES_ENABLED=false) to disable UI updates --
+  # the Docker socket below is root-equivalent on the host.
+  updater:
+    image: ghcr.io/litebooks/litebooks-updater:${LITEBOOKS_UPDATER_TAG:-main}
+    restart: unless-stopped
+    environment:
+      LITEBOOKS_COMPOSE_PROJECT: litebooks
+      LITEBOOKS_IMAGE: ${LITEBOOKS_UPDATE_IMAGE:-ghcr.io/litebooks/litebooks}
+      LITEBOOKS_HEALTH_URL: http://web:8000/healthz/
+      LITEBOOKS_POLL_SECONDS: ${LITEBOOKS_UPDATE_POLL_SECONDS:-5}
+      LITEBOOKS_HEALTH_TIMEOUT: ${LITEBOOKS_UPDATE_HEALTH_TIMEOUT:-180}
+      LITEBOOKS_BACKUP_KEEP: ${LITEBOOKS_UPDATE_BACKUP_KEEP:-5}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./compose.yaml:/repo/compose.yaml:ro
+      - ./.env:/repo/.env
+      - update_state:/state
+    depends_on:
+      - web
+
 volumes:
   postgres_data:
   attachments:
+  update_state:

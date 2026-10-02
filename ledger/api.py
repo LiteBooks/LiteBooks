@@ -18,6 +18,7 @@ from .models import Account, AccountingPeriod, AuditEvent, BusinessDocument, Con
 from .permissions import ROLE_LEVEL, user_role
 from .reporting import account_rows, aging, balance_sheet, income_statement, owner_balances, trial_balance
 from .services import create_document, create_entry, create_owner_activity, create_payment, record_audit, update_entry
+from . import updates
 
 
 def money(value):
@@ -220,7 +221,8 @@ def session_api(request):
     return JsonResponse({
         "authenticated": True,
         "user": {"id": request.user.pk, "username": request.user.username, "name": request.user.get_full_name() or request.user.username, "role": role, "role_label": UserProfile.Role(role).label},
-        "permissions": {"edit_books": ROLE_LEVEL[role] >= ROLE_LEVEL[UserProfile.Role.BOOKKEEPER], "administer": ROLE_LEVEL[role] >= ROLE_LEVEL[UserProfile.Role.ADMIN]},
+        "permissions": {"edit_books": ROLE_LEVEL[role] >= ROLE_LEVEL[UserProfile.Role.BOOKKEEPER], "administer": ROLE_LEVEL[role] >= ROLE_LEVEL[UserProfile.Role.ADMIN], "update_system": role == UserProfile.Role.OWNER},
+        "update_available": ROLE_LEVEL[role] >= ROLE_LEVEL[UserProfile.Role.ADMIN] and updates.update_available(),
     })
 
 
@@ -586,3 +588,53 @@ def user_api(request, pk):
 def audit_api(request):
     events = AuditEvent.objects.select_related("actor")[:500]
     return JsonResponse({"events": [audit_json(item) for item in events]})
+
+
+@api_view(authenticated=False)
+def health_api(request):
+    """Unauthenticated liveness probe.
+
+    The updater polls this after swapping the image and compares `sha` against
+    the version it installed, so a container that merely answers on port 8000
+    is not mistaken for a successful update.
+    """
+    from django.db import connection
+    from django.db.migrations.executor import MigrationExecutor
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+        executor = MigrationExecutor(connection)
+        pending = bool(executor.migration_plan(executor.loader.graph.leaf_nodes()))
+        status, code = ("ok", 200) if not pending else ("migrations_pending", 503)
+    except Exception as error:  # noqa: BLE001 - a probe must answer, not raise
+        return JsonResponse({"status": "error", "detail": str(error), **updates.current_version()}, status=503)
+    return JsonResponse({"status": status, "migrations_pending": pending, **updates.current_version()}, status=code)
+
+
+@api_view(minimum_role=UserProfile.Role.ADMIN)
+def system_update_api(request):
+    state = updates.check_github()
+    return JsonResponse({
+        "current": updates.current_version(),
+        "state": updates.state_json(state),
+        "run": updates.run_json(updates.read_status()),
+    })
+
+
+@api_view(methods=("POST",), minimum_role=UserProfile.Role.ADMIN)
+def system_update_check_api(request):
+    state = updates.check_github(force=True)
+    return JsonResponse({"current": updates.current_version(), "state": updates.state_json(state)})
+
+
+@api_view(methods=("POST",), minimum_role=UserProfile.Role.OWNER)
+def system_update_apply_api(request):
+    data = request_data(request)
+    run = updates.request_update(request.user, data.get("target_sha", ""))
+    return JsonResponse({"ok": True, "run": updates.run_json(run)})
+
+
+@api_view(minimum_role=UserProfile.Role.ADMIN)
+def system_update_status_api(request):
+    return JsonResponse({"run": updates.run_json(updates.read_status()), "current": updates.current_version()})

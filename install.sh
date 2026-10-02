@@ -10,6 +10,7 @@ MODE="auto"
 START_APP="true"
 FORCE_ENV="false"
 BOOTSTRAP_OWNER="true"
+BUILD_FROM_SOURCE="false"
 ADMIN_USERNAME="admin"
 ADMIN_PASSWORD=""
 ADMIN_FIRST_NAME=""
@@ -38,6 +39,8 @@ Usage:
 Options:
   --mode auto|docker|local       Choose install path. Default: auto.
   --no-start                     Prepare dependencies and config, but do not start the app.
+  --build                        Build the image from this checkout instead of pulling the
+                                 published one. Slower, and needed only for local changes.
   --force-env                    Regenerate .env from .env.example.
   --skip-bootstrap               Do not create the first owner login.
   --admin-username USERNAME      First owner username. Default: admin.
@@ -49,6 +52,7 @@ Options:
 Examples:
   ./install.sh
   ./install.sh --admin-username owner
+  ./install.sh --build
   ./install.sh --mode docker --skip-bootstrap
 USAGE
 }
@@ -66,6 +70,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-start)
       START_APP="false"
+      shift
+      ;;
+    --build)
+      BUILD_FROM_SOURCE="true"
       shift
       ;;
     --force-env)
@@ -220,7 +228,10 @@ preflight_install() {
 
   if [[ "${selected_mode}" == "docker" ]]; then
     find_compose_file >/dev/null || die "Missing Compose file. Cannot start the ${APP_NAME} stack."
-    [[ -f "${PROJECT_ROOT}/Dockerfile" ]] || die "Missing Dockerfile. Cannot build the ${APP_NAME} web image."
+    if [[ "${BUILD_FROM_SOURCE}" == "true" ]]; then
+      [[ -f "${PROJECT_ROOT}/Dockerfile" ]] || die "Missing Dockerfile. Cannot build the ${APP_NAME} web image."
+      [[ -f "${PROJECT_ROOT}/compose.build.yaml" ]] || die "Missing compose.build.yaml. Cannot build from source."
+    fi
   fi
 }
 
@@ -287,20 +298,41 @@ run_docker_install() {
   compose_cmd
   docker info >/dev/null 2>&1 || die "Docker is not running. Start Docker, then rerun ./install.sh."
 
-  log "Installing ${APP_NAME} with Docker Compose"
+  # Published images are the default: building the frontend and Python deps on a
+  # small LXC is slow and memory hungry. --build is for working on the source.
+  local compose_args=(-f "${compose_file}")
+  if [[ "${BUILD_FROM_SOURCE}" == "true" ]]; then
+    compose_args+=(-f "${PROJECT_ROOT}/compose.build.yaml")
+  fi
+  compose_args+=(--env-file "${ENV_FILE}")
+
+  if [[ "${BUILD_FROM_SOURCE}" == "true" ]]; then
+    log "Installing ${APP_NAME} with Docker Compose (building from source)"
+  else
+    log "Installing ${APP_NAME} with Docker Compose (pulling published images)"
+  fi
 
   if [[ "${START_APP}" != "true" ]]; then
-    "${COMPOSE_CMD[@]}" -f "${compose_file}" --env-file "${ENV_FILE}" build
+    if [[ "${BUILD_FROM_SOURCE}" == "true" ]]; then
+      "${COMPOSE_CMD[@]}" "${compose_args[@]}" build
+    else
+      "${COMPOSE_CMD[@]}" "${compose_args[@]}" pull
+    fi
     log "Skipping app startup because --no-start was passed"
     return
   fi
 
-  "${COMPOSE_CMD[@]}" -f "${compose_file}" --env-file "${ENV_FILE}" up -d --build
+  if [[ "${BUILD_FROM_SOURCE}" == "true" ]]; then
+    "${COMPOSE_CMD[@]}" "${compose_args[@]}" up -d --build
+  else
+    "${COMPOSE_CMD[@]}" "${compose_args[@]}" pull
+    "${COMPOSE_CMD[@]}" "${compose_args[@]}" up -d
+  fi
   log "LiteBooks is starting at http://127.0.0.1:${LITEBOOKS_PORT:-8000}"
 
   if [[ "${BOOTSTRAP_OWNER}" == "true" ]]; then
     log "Creating first owner login if needed"
-    "${COMPOSE_CMD[@]}" -f "${compose_file}" --env-file "${ENV_FILE}" exec -T web python manage.py bootstrap_litebooks \
+    "${COMPOSE_CMD[@]}" "${compose_args[@]}" exec -T web python manage.py bootstrap_litebooks \
       --username "${ADMIN_USERNAME}" \
       --password "${ADMIN_PASSWORD}" \
       --first-name "${ADMIN_FIRST_NAME}" \

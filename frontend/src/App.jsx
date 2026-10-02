@@ -12,6 +12,7 @@ import LoginPage from "./pages/Login";
 import { OwnersList, OwnerActivityForm } from "./pages/Owners";
 import { ReportDetail, ReportsIndex } from "./pages/Reports";
 import { PeriodsPage, ProfilePage, UserEditPage, UsersPage } from "./pages/Settings";
+import SystemUpdatePage from "./pages/SystemUpdate";
 import { TransactionDetail, TransactionForm, TransactionsList } from "./pages/Transactions";
 
 function FullPageLoading() {
@@ -57,6 +58,7 @@ export default function App() {
         <Route path="/settings/profile/" element={<ProfilePage />} />
         <Route path="/settings/users/" element={<UsersPage />} />
         <Route path="/settings/users/:id/edit/" element={<UserEditPage />} />
+        <Route path="/settings/updates/" element={<SystemUpdatePage />} />
         <Route path="/audit/" element={<AuditPage />} />
         <Route path="*" element={<NotFound />} />
       </Routes>

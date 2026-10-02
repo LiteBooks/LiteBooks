@@ -333,3 +333,63 @@ class AuditEvent(models.Model):
 
     def __str__(self):
         return f"{self.action} {self.object_type} {self.object_id}"
+
+
+class SystemUpdateState(models.Model):
+    """Singleton cache of what the upstream repository currently offers."""
+
+    last_checked_at = models.DateTimeField(null=True, blank=True)
+    check_error = models.CharField(max_length=300, blank=True)
+    latest_sha = models.CharField(max_length=40, blank=True)
+    latest_committed_at = models.DateTimeField(null=True, blank=True)
+    latest_message = models.CharField(max_length=300, blank=True)
+    commits_behind = models.PositiveIntegerField(default=0)
+    commit_log = models.JSONField(default=list, blank=True)
+    image_available = models.BooleanField(default=False)
+    dismissed_sha = models.CharField(max_length=40, blank=True)
+
+    class Meta:
+        verbose_name = "system update state"
+
+    def __str__(self):
+        return f"update state (behind {self.commits_behind})"
+
+    @classmethod
+    def load(cls):
+        state, _ = cls.objects.get_or_create(pk=1)
+        return state
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+
+class SystemUpdateRun(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        RUNNING = "running", "Running"
+        SUCCESS = "success", "Succeeded"
+        FAILED = "failed", "Failed"
+
+    ACTIVE_STATUSES = (Status.PENDING, Status.RUNNING)
+
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    requested_at = models.DateTimeField(default=timezone.now, db_index=True)
+    from_sha = models.CharField(max_length=40, blank=True)
+    to_sha = models.CharField(max_length=40)
+    to_tag = models.CharField(max_length=60)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    step = models.CharField(max_length=40, blank=True)
+    log = models.TextField(blank=True)
+    backup_path = models.CharField(max_length=300, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-requested_at"]
+
+    def __str__(self):
+        return f"update to {self.to_tag} ({self.status})"
+
+    @property
+    def is_active(self):
+        return self.status in self.ACTIVE_STATUSES

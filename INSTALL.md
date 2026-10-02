@@ -6,7 +6,7 @@ LiteBooks has a single install entrypoint:
 ./install.sh
 ```
 
-The installer creates `.env` from `.env.example`, generates a secure Django secret key and database password, starts Docker Compose, runs database migrations, and can create the first owner login.
+The installer creates `.env` from `.env.example`, generates a secure Django secret key and database password, pulls the published container images, starts Docker Compose, runs database migrations, and can create the first owner login.
 
 ## Common Install
 
@@ -44,13 +44,28 @@ Prepare config and containers but leave services stopped:
 ./install.sh --no-start
 ```
 
+Build the images from this checkout instead of pulling the published ones:
+
+```bash
+./install.sh --build
+```
+
 Regenerate `.env` with new secrets:
 
 ```bash
 ./install.sh --force-env
 ```
 
+Warning: `--force-env` generates a new `POSTGRES_PASSWORD`, which will lock an existing
+installation out of its own database volume. Use it only on a fresh install.
+
 Set `LITEBOOKS_PORT` in `.env` to publish a different host port.
+
+## Keeping it updated
+
+After installation, LiteBooks updates itself from **Settings -> Software update** in the
+web interface. See [Update LiteBooks](README.md#update-litebooks) for how that works and
+how to turn it off.
 
 ## Proxmox
 
