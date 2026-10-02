@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link as RouterLink, NavLink, useLocation, useNavigate } from "react-router-dom";
 import {
-  AppBar, Avatar, Box, ButtonBase, Divider, Drawer, IconButton, List, ListItemButton, ListItemIcon,
+  AppBar, Avatar, Badge, Box, ButtonBase, Divider, Drawer, IconButton, List, ListItemButton, ListItemIcon,
   ListItemText, Menu, MenuItem, Stack, Toolbar, Tooltip, Typography, useMediaQuery,
 } from "@mui/material";
 import AccountBalanceRounded from "@mui/icons-material/AccountBalanceRounded";
@@ -17,6 +17,7 @@ import MenuRounded from "@mui/icons-material/MenuRounded";
 import PeopleRounded from "@mui/icons-material/PeopleRounded";
 import ReceiptLongRounded from "@mui/icons-material/ReceiptLongRounded";
 import SettingsRounded from "@mui/icons-material/SettingsRounded";
+import SystemUpdateAltRounded from "@mui/icons-material/SystemUpdateAltRounded";
 import { useTheme } from "@mui/material/styles";
 import { api } from "../api";
 import { useApp } from "../context";
@@ -29,12 +30,12 @@ const mainItems = [
   ["Reports", "/reports/", AssessmentRounded],
 ];
 
-function NavItem({ label, to, Icon, onClick }) {
+function NavItem({ label, to, Icon, onClick, badge = false }) {
   const location = useLocation();
   const active = to === "/" ? location.pathname === "/" : location.pathname.startsWith(to);
   return (
     <ListItemButton component={NavLink} to={to} onClick={onClick} selected={active} sx={{ mx: 1, my: 0.25, minHeight: 42, borderRadius: 1, color: "rgba(255,255,255,.78)", "& .MuiListItemIcon-root": { color: "inherit" }, "&.Mui-selected": { color: "#17372F", bgcolor: "#E5F0EC", "&:hover": { bgcolor: "#E5F0EC" } }, "&:hover": { bgcolor: "rgba(255,255,255,.08)" } }}>
-      <ListItemIcon sx={{ minWidth: 38 }}><Icon fontSize="small" /></ListItemIcon><ListItemText primary={label} primaryTypographyProps={{ fontSize: 14, fontWeight: 600 }} />
+      <ListItemIcon sx={{ minWidth: 38 }}><Badge color="secondary" variant="dot" invisible={!badge}><Icon fontSize="small" /></Badge></ListItemIcon><ListItemText primary={label} primaryTypographyProps={{ fontSize: 14, fontWeight: 600 }} />
     </ListItemButton>
   );
 }
@@ -61,7 +62,7 @@ export default function Layout({ children }) {
       <Divider sx={{ borderColor: "rgba(255,255,255,.1)" }} />
       <List sx={{ pt: 1.5 }}>{mainItems.map(([label, to, Icon]) => <NavItem key={to} label={label} to={to} Icon={Icon} onClick={close} />)}</List>
       <Box sx={{ mt: "auto", pb: 1.5 }}>
-        {session.permissions.administer && <><NavItem label="Period locks" to="/settings/periods/" Icon={SettingsRounded} onClick={close} /><NavItem label="Users" to="/settings/users/" Icon={PeopleRounded} onClick={close} /></>}
+        {session.permissions.administer && <><NavItem label="Period locks" to="/settings/periods/" Icon={SettingsRounded} onClick={close} /><NavItem label="Users" to="/settings/users/" Icon={PeopleRounded} onClick={close} /><NavItem label="Software update" to="/settings/updates/" Icon={SystemUpdateAltRounded} onClick={close} badge={Boolean(session.update_available)} /></>}
         <NavItem label="Audit history" to="/audit/" Icon={FactCheckRounded} onClick={close} />
         <ListItemButton onClick={signOut} sx={{ mx: 1, mt: 0.25, borderRadius: 1, color: "rgba(255,255,255,.78)", "&:hover": { bgcolor: "rgba(255,255,255,.08)" } }}>
           <ListItemIcon sx={{ minWidth: 38, color: "inherit" }}><LogoutRounded fontSize="small" /></ListItemIcon><ListItemText primary="Sign out" primaryTypographyProps={{ fontSize: 14, fontWeight: 600 }} />

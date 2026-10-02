@@ -26,4 +26,8 @@ urlpatterns = [
     path("users/", api.users_api, name="api-users"),
     path("users/<int:pk>/", api.user_api, name="api-user"),
     path("audit/", api.audit_api, name="api-audit"),
+    path("system/update/", api.system_update_api, name="api-system-update"),
+    path("system/update/check/", api.system_update_check_api, name="api-system-update-check"),
+    path("system/update/apply/", api.system_update_apply_api, name="api-system-update-apply"),
+    path("system/update/status/", api.system_update_status_api, name="api-system-update-status"),
 ]

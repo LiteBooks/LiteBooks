@@ -121,14 +121,63 @@ docker compose start
 
 ## Update LiteBooks
 
-Create a backup first, then run:
+LiteBooks updates itself from the web interface. Sign in as an owner and open
+**Settings -> Software update**. The page shows the version you are running, whether
+`main` has moved ahead, and the list of commits you would be installing. Press
+**Update now** and LiteBooks will:
+
+1. Take a full database backup into the `update_state` volume.
+2. Pull the published image for that commit from GHCR.
+3. Restart the web container, which applies database migrations on start.
+4. Verify that the new build is actually serving before reporting success.
+
+The browser reconnects on its own when the restart finishes. Administrators see the
+page and can check for updates; only an owner can install one.
+
+LiteBooks checks GitHub at most once a day, during a page load. **Check for updates**
+forces a check immediately.
+
+### How the update actually runs
+
+The web container runs unprivileged and has no access to Docker, so it cannot update
+itself. The `updater` sidecar in `compose.yaml` does that work: the web container writes
+an update request into a shared volume, and the updater pulls the image and restarts the
+service.
+
+That sidecar mounts the Docker socket, which is **root-equivalent on the host** -- the
+same tradeoff Watchtower and the Home Assistant supervisor make. To opt out, set
+`LITEBOOKS_UPDATES_ENABLED=false` in `.env` and remove the `updater` service from
+`compose.yaml`. The UI then reports that updates are disabled, and you update from the
+command line instead.
+
+### If an update fails
+
+LiteBooks stops and shows the log rather than rolling back. This is deliberate: the
+container applies database migrations as it starts, Django migrations are not reliably
+reversible, and restoring the old image over a migrated database would leave the
+application and the schema out of step.
+
+The failure report names the pre-update backup. Restore it with the commands in
+[Restore a backup](#restore-a-backup), then set `LITEBOOKS_TAG` in `.env` back to the
+previous `sha-...` value and run `docker compose up -d web`.
+
+### Updating from the command line
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+To run a specific build, set `LITEBOOKS_TAG=sha-abc1234` in `.env` first. To build from
+your own checkout instead of the published image:
 
 ```bash
 git pull --ff-only
-docker compose up -d --build
+docker compose -f compose.yaml -f compose.build.yaml up -d --build
 ```
 
-Database migrations run automatically when the updated application starts. Check the result with `docker compose ps` and `docker compose logs web`.
+Check the result with `docker compose ps` and `docker compose logs web`. `GET /healthz/`
+reports the running commit and whether migrations are pending.
 
 ## Back up your data
 

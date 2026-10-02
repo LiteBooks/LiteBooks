@@ -30,6 +30,7 @@ urlpatterns = [
     path("settings/profile/", spa.spa, name="profile-settings"),
     path("settings/users/", spa.spa, name="user-list"),
     path("settings/users/<int:pk>/edit/", spa.spa, name="user-edit"),
+    path("settings/updates/", spa.spa, name="system-update"),
     path("audit/", spa.spa, name="audit-list"),
     path("attachments/<int:pk>/download/", views.attachment_download, name="attachment-download"),
     path("export/excel/", views.export_workbook, name="export-workbook"),
