@@ -110,7 +110,10 @@ LOGIN_REDIRECT_URL = "dashboard"
 LOGOUT_REDIRECT_URL = "login"
 
 SESSION_COOKIE_HTTPONLY = True
-CSRF_COOKIE_HTTPONLY = True
+# Must stay readable by JavaScript: the SPA reads the CSRF cookie in
+# frontend/src/api.js to set the X-CSRFToken header on every mutation. With
+# HttpOnly the header is always empty and Django rejects every POST with 403.
+CSRF_COOKIE_HTTPONLY = False
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
 if not DEBUG:
