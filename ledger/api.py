@@ -484,7 +484,10 @@ def payment_api(request, pk):
 @api_view(methods=("GET", "POST"))
 def owners_api(request):
     if request.method == "GET":
-        rows = owner_balances()
+        rows = {row["owner"].pk: row for row in owner_balances()}
+        for owner in Contact.objects.filter(kind=Contact.Kind.OWNER, is_active=True):
+            rows.setdefault(owner.pk, {"owner": owner, "contributions": Decimal("0.00"), "draws": Decimal("0.00"), "owed": Decimal("0.00")})
+        rows = sorted(rows.values(), key=lambda row: row["owner"].name)
         activities = OwnerActivity.objects.select_related("owner", "journal_entry")[:50]
         return JsonResponse({
             "owners": [{"owner": contact_json(row["owner"]), "contributions": money(row["contributions"]), "draws": money(row["draws"]), "owed": money(row["owed"])} for row in rows],

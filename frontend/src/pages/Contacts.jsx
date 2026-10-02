@@ -31,18 +31,23 @@ export function ContactForm() {
   const { id } = useParams();
   const editing = Boolean(id);
   const navigate = useNavigate();
+  const location = useLocation();
   const { options, refreshOptions, notify } = useApp();
   const detail = useApiData(editing ? `/api/contacts/${id}/` : null, [id]);
-  const [values, setValues] = useState({ name: "", kind: "customer", email: "", phone: "", address: "", notes: "", is_active: true });
+  const requestedKind = new URLSearchParams(location.search).get("kind") || "";
+  const [values, setValues] = useState({ name: "", kind: requestedKind || "customer", email: "", phone: "", address: "", notes: "", is_active: true });
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
   useEffect(() => { if (editing && detail.data?.contact) { const item = detail.data.contact; setValues({ name: item.name, kind: item.kind, email: item.email, phone: item.phone, address: item.address, notes: item.notes, is_active: item.is_active }); } }, [editing, detail.data]);
   if (editing && detail.loading) return <PageLoading title="Edit contact" />;
   const set = (key) => (event) => setValues({ ...values, [key]: event.target.value });
-  const submit = async (event) => { event.preventDefault(); setSaving(true); setErrors({}); try { await api(editing ? `/api/contacts/${id}/` : "/api/contacts/", { method: "POST", body: values }); await refreshOptions(); notify(`Contact ${editing ? "updated" : "created"}.`); navigate("/contacts/"); } catch (error) { setErrors({ ...(error.fields || {}), __all__: error.message }); } finally { setSaving(false); } };
-  const label = editing ? detail.data?.contact.name || "contact" : "New contact";
+  const ownerFlow = !editing && requestedKind === "owner";
+  const noun = ownerFlow ? "owner" : "contact";
+  const returnTo = ownerFlow ? "/owners/" : "/contacts/";
+  const submit = async (event) => { event.preventDefault(); setSaving(true); setErrors({}); try { await api(editing ? `/api/contacts/${id}/` : "/api/contacts/", { method: "POST", body: values }); await refreshOptions(); notify(`${values.kind === "owner" ? "Owner" : "Contact"} ${editing ? "updated" : "created"}.`); navigate(values.kind === "owner" ? returnTo : "/contacts/"); } catch (error) { setErrors({ ...(error.fields || {}), __all__: error.message }); } finally { setSaving(false); } };
+  const label = editing ? detail.data?.contact.name || "contact" : `New ${noun}`;
   return (
-    <Page title={editing ? `Edit ${label}` : label} eyebrow="Contacts" crumbs={[{ label: "Contacts", to: "/contacts/" }, { label: editing ? label : "New contact" }]}>
+    <Page title={editing ? `Edit ${label}` : label} eyebrow={ownerFlow ? "Equity and liabilities" : "Contacts"} crumbs={ownerFlow ? [{ label: "Owners", to: "/owners/" }, { label: "New owner" }] : [{ label: "Contacts", to: "/contacts/" }, { label: editing ? label : "New contact" }]}>
       <Paper component="form" onSubmit={submit} variant="outlined" sx={{ p: { xs: 2, sm: 3 }, maxWidth: 760 }}>
         {errors.__all__ && <Alert severity="error" sx={{ mb: 2 }}>{errors.__all__}</Alert>}
         <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "repeat(2, 1fr)" }, gap: 2 }}>
@@ -54,7 +59,7 @@ export function ContactForm() {
           <TextField multiline minRows={3} label="Notes" value={values.notes} onChange={set("notes")} />
           <FormControlLabel control={<Switch checked={values.is_active} onChange={(event) => setValues({ ...values, is_active: event.target.checked })} />} label="Active contact" />
         </Box>
-        <FormActions saving={saving} submitLabel="Save contact" cancelTo="/contacts/" />
+        <FormActions saving={saving} submitLabel={`Save ${noun}`} cancelTo={returnTo} />
       </Paper>
     </Page>
   );

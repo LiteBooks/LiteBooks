@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link as RouterLink, useNavigate, useParams } from "react-router-dom";
+import { Link as RouterLink, useLocation, useNavigate, useParams } from "react-router-dom";
 import { Alert, Box, Button, Card, CardContent, Chip, Link, MenuItem, Paper, Stack, Switch, FormControlLabel, TextField, Typography } from "@mui/material";
 import AddRounded from "@mui/icons-material/AddRounded";
 import EditRounded from "@mui/icons-material/EditRounded";
@@ -60,9 +60,12 @@ export function AccountForm() {
   const { id } = useParams();
   const editing = Boolean(id);
   const navigate = useNavigate();
+  const location = useLocation();
   const { options, refreshOptions, notify } = useApp();
   const detail = useApiData(editing ? `/api/accounts/${id}/` : null, [id]);
-  const [values, setValues] = useState({ code: "", name: "", type: "asset", subtype: "bank", description: "", is_active: true });
+  const requested = new URLSearchParams(location.search).get("subtype") || "";
+  const seeded = subtypeTypes[requested] ? { type: subtypeTypes[requested], subtype: requested } : { type: "asset", subtype: "bank" };
+  const [values, setValues] = useState({ code: "", name: "", description: "", is_active: true, ...seeded });
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
   useEffect(() => { if (editing && detail.data?.account) { const account = detail.data.account; setValues({ code: account.code, name: account.name, type: account.type, subtype: account.subtype, description: account.description, is_active: account.is_active }); } }, [editing, detail.data]);
