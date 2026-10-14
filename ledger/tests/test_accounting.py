@@ -11,7 +11,7 @@ from openpyxl import load_workbook
 
 from ledger.models import Account, AccountingPeriod, AuditEvent, BusinessDocument, Contact, JournalEntry, UserProfile
 from ledger.reporting import balance_sheet, owner_balances, trial_balance
-from ledger.services import create_document, create_entry, create_owner_activity, create_payment, delete_entry, restore_entry, update_entry
+from ledger.services import create_document, create_entry, create_owner_activity, create_payment, delete_entry, restore_entry, update_document, update_entry
 
 
 class AccountingTestCase(TestCase):
@@ -187,6 +187,94 @@ class AccountingTestCase(TestCase):
         self.assertEqual(invoice.balance_due, Decimal("300"))
         self.assertEqual(payment.journal_entry.linked_entry, invoice.journal_entry)
         self.assertTrue(payment.journal_entry.is_balanced)
+
+    def invoice(self, number="INV-500", amount="500", issue_date=date(2026, 4, 1)):
+        return create_document(
+            kind=BusinessDocument.Kind.INVOICE, number=number, contact=self.customer,
+            issue_date=issue_date, due_date=date(2026, 5, 1), description="Services", amount=Decimal(amount),
+            control_account=self.ar, category_account=self.sales, user=self.user,
+        )
+
+    def edit_invoice(self, invoice, **changes):
+        fields = {
+            "number": invoice.number, "contact": invoice.contact, "issue_date": invoice.issue_date, "due_date": invoice.due_date,
+            "description": invoice.description, "amount": invoice.amount, "control_account": invoice.control_account,
+            "category_account": invoice.category_account,
+        }
+        return update_document(document=invoice, user=self.user, **{**fields, **changes})
+
+    def test_editing_an_invoice_rewrites_its_entry(self):
+        invoice = self.invoice()
+        other_revenue = Account.objects.create(code="4100", name="Consulting", type=Account.Type.REVENUE, subtype=Account.Subtype.SALES)
+        invoice = self.edit_invoice(invoice, number="INV-501", amount=Decimal("650"), issue_date=date(2026, 4, 3), description="More services", category_account=other_revenue)
+        entry = JournalEntry.objects.get(pk=invoice.journal_entry_id)
+        self.assertEqual((entry.date, entry.number, entry.version), (date(2026, 4, 3), "20260403-0001", 2))
+        self.assertEqual(entry.description, "Invoice INV-501: More services")
+        self.assertEqual(
+            [(line.account, line.debit, line.credit) for line in entry.lines.order_by("sort_order")],
+            [(self.ar, Decimal("650"), Decimal("0")), (other_revenue, Decimal("0"), Decimal("650"))],
+        )
+        self.assertTrue(entry.is_balanced)
+        self.assertEqual(AuditEvent.objects.filter(object_type="ledger.BusinessDocument", object_id=str(invoice.pk), action="updated").count(), 1)
+
+    def test_editing_a_paid_invoice_respects_its_payments(self):
+        invoice = self.invoice()
+        create_payment(document=invoice, payment_date=date(2026, 4, 10), amount=Decimal("200"), cash_account=self.bank, user=self.user)
+        with self.assertRaises(ValidationError):
+            self.edit_invoice(invoice, amount=Decimal("150"))
+        other_customer = Contact.objects.create(name="Other Customer", kind=Contact.Kind.CUSTOMER)
+        with self.assertRaises(ValidationError):
+            self.edit_invoice(invoice, contact=other_customer)
+        invoice = self.edit_invoice(invoice, amount=Decimal("200"))
+        self.assertEqual(invoice.status, BusinessDocument.Status.PAID)
+        invoice = self.edit_invoice(invoice, amount=Decimal("800"))
+        self.assertEqual((invoice.status, invoice.balance_due), (BusinessDocument.Status.PARTIAL, Decimal("600")))
+
+    def test_renumbering_an_invoice_renames_its_payments(self):
+        invoice = self.invoice()
+        payment = create_payment(document=invoice, payment_date=date(2026, 4, 10), amount=Decimal("200"), cash_account=self.bank, user=self.user)
+        self.edit_invoice(invoice, number="INV-777")
+        entry = JournalEntry.objects.get(pk=payment.journal_entry_id)
+        self.assertEqual((entry.description, entry.version), ("Payment received for invoice INV-777", 2))
+        self.assertEqual(AuditEvent.objects.filter(object_type="ledger.JournalEntry", object_id=str(entry.pk), action="updated").count(), 1)
+        # Other edits leave the payment alone.
+        self.edit_invoice(BusinessDocument.objects.get(pk=invoice.pk), description="Reworded")
+        self.assertEqual(JournalEntry.objects.get(pk=payment.journal_entry_id).version, 2)
+
+    def test_renumbering_is_blocked_when_a_payment_is_in_a_closed_period(self):
+        invoice = self.invoice()
+        create_payment(document=invoice, payment_date=date(2026, 5, 10), amount=Decimal("200"), cash_account=self.bank, user=self.user)
+        AccountingPeriod.objects.create(year=2026, month=5, closed_at=timezone.now(), closed_by=self.user)
+        with self.assertRaises(ValidationError):
+            self.edit_invoice(invoice, number="INV-778")
+        self.assertEqual(BusinessDocument.objects.get(pk=invoice.pk).number, "INV-500")
+
+    def test_closed_period_rejects_invoice_edits(self):
+        invoice = self.invoice(issue_date=date(2026, 6, 2))
+        AccountingPeriod.objects.create(year=2026, month=6, closed_at=timezone.now(), closed_by=self.user)
+        with self.assertRaises(ValidationError):
+            self.edit_invoice(invoice, issue_date=date(2026, 7, 1))
+        self.assertEqual(JournalEntry.objects.get(pk=invoice.journal_entry_id).version, 1)
+
+    def test_bill_edit_api_and_entry_edit_link(self):
+        bill = create_document(
+            kind=BusinessDocument.Kind.BILL, number="B-1", contact=self.vendor,
+            issue_date=date(2026, 8, 1), due_date=date(2026, 8, 31), description="Supplies", amount=Decimal("90"),
+            control_account=self.ap, category_account=self.expense, user=self.user,
+        )
+        self.client.force_login(self.user)
+        detail = self.client.get(reverse("api-transaction", args=[bill.journal_entry_id])).json()["entry"]
+        self.assertEqual((detail["can_edit"], detail["edit_url"]), (True, f"/documents/{bill.pk}/edit/"))
+        response = self.client.post(reverse("api-document", args=[bill.pk]), {
+            "number": "B-1", "contact": self.vendor.pk, "issue_date": "2026-08-01", "due_date": "2026-08-31",
+            "description": "Supplies", "amount": "120.00", "control_account": self.ap.pk, "category_account": self.expense.pk,
+        })
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()["document"]["amount"], "120.00")
+        self.assertEqual(JournalEntry.objects.get(pk=bill.journal_entry_id).total, Decimal("120"))
+        # The journal endpoint still refuses to touch a document's entry directly.
+        response = self.client.post(reverse("api-transaction", args=[bill.journal_entry_id]), {"date": "2026-08-01", "description": "x", "lines": "[]"})
+        self.assertEqual(response.status_code, 400)
 
     def test_owner_loan_tracks_amount_owed(self):
         create_owner_activity(

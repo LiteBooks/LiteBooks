@@ -228,9 +228,7 @@ def add_attachment(entry, upload, user):
     )
 
 
-@transaction.atomic
-def create_document(*, kind, number, contact, issue_date, due_date, description, amount, control_account, category_account, user, attachment=None):
-    amount = Decimal(amount)
+def document_lines(*, kind, amount, control_account, category_account):
     if amount <= 0:
         raise PostingError("Document amount must be greater than zero.")
     if kind == BusinessDocument.Kind.INVOICE:
@@ -238,24 +236,56 @@ def create_document(*, kind, number, contact, issue_date, due_date, description,
             raise PostingError("Invoices require an accounts receivable control account.")
         if category_account.type != category_account.Type.REVENUE:
             raise PostingError("Invoices require a revenue category account.")
-        lines = [
+        return [
             {"account": control_account, "debit": amount, "credit": 0, "owner": None},
             {"account": category_account, "debit": 0, "credit": amount, "owner": None},
         ]
-        source = JournalEntry.Source.INVOICE
-    else:
-        if control_account.subtype != control_account.Subtype.PAYABLE:
-            raise PostingError("Bills require an accounts payable control account.")
-        if category_account.type != category_account.Type.EXPENSE:
-            raise PostingError("Bills require an expense category account.")
-        lines = [
-            {"account": category_account, "debit": amount, "credit": 0, "owner": None},
-            {"account": control_account, "debit": 0, "credit": amount, "owner": None},
-        ]
-        source = JournalEntry.Source.BILL
+    if control_account.subtype != control_account.Subtype.PAYABLE:
+        raise PostingError("Bills require an accounts payable control account.")
+    if category_account.type != category_account.Type.EXPENSE:
+        raise PostingError("Bills require an expense category account.")
+    return [
+        {"account": category_account, "debit": amount, "credit": 0, "owner": None},
+        {"account": control_account, "debit": 0, "credit": amount, "owner": None},
+    ]
+
+
+def document_entry_description(kind, number, description):
+    return f"{BusinessDocument.Kind(kind).label} {number}: {description}"
+
+
+def payment_entry_description(kind, number):
+    if kind == BusinessDocument.Kind.INVOICE:
+        return f"Payment received for invoice {number}"
+    return f"Payment made for bill {number}"
+
+
+def document_snapshot(document):
+    return {
+        "number": document.number,
+        "contact_id": document.contact_id,
+        "issue_date": document.issue_date.isoformat(),
+        "due_date": document.due_date.isoformat(),
+        "description": document.description,
+        "amount": str(document.amount),
+        "control_account_id": document.control_account_id,
+        "category_account_id": document.category_account_id,
+        "status": document.status,
+    }
+
+
+def can_edit_document(document):
+    return document.status != BusinessDocument.Status.VOID and not document.journal_entry.is_deleted
+
+
+@transaction.atomic
+def create_document(*, kind, number, contact, issue_date, due_date, description, amount, control_account, category_account, user, attachment=None):
+    amount = Decimal(amount)
+    lines = document_lines(kind=kind, amount=amount, control_account=control_account, category_account=category_account)
+    source = JournalEntry.Source.INVOICE if kind == BusinessDocument.Kind.INVOICE else JournalEntry.Source.BILL
     entry = create_entry(
         entry_date=issue_date,
-        description=f"{BusinessDocument.Kind(kind).label} {number}: {description}",
+        description=document_entry_description(kind, number, description),
         lines=lines,
         user=user,
         contact=contact,
@@ -279,6 +309,75 @@ def create_document(*, kind, number, contact, issue_date, due_date, description,
 
 
 @transaction.atomic
+def update_document(*, document, number, contact, issue_date, due_date, description, amount, control_account, category_account, user, attachment=None):
+    """Edit an invoice or bill and rewrite its journal entry to match.
+
+    The entry is never edited on its own, so the document and the ledger cannot
+    drift apart. Payments already posted against the document stay as they are,
+    which is why the contact and control account are frozen once one exists.
+    """
+    document = BusinessDocument.objects.select_for_update().select_related("journal_entry").get(pk=document.pk)
+    entry = document.journal_entry
+    if document.status == BusinessDocument.Status.VOID:
+        raise PostingError("A void document cannot be edited.")
+    if entry.is_deleted:
+        raise PostingError("This document's transaction is deleted. Restore it before editing.")
+    ensure_period_open(entry.date)
+    ensure_period_open(issue_date)
+    amount = Decimal(amount)
+    paid = document.amount_paid
+    if paid:
+        if amount < paid:
+            raise PostingError(f"The amount cannot be less than the {paid:.2f} already paid.")
+        if contact != document.contact or control_account != document.control_account:
+            raise PostingError("The contact and control account cannot change once payments are recorded.")
+    lines = document_lines(kind=document.kind, amount=amount, control_account=control_account, category_account=category_account)
+    # Payment entries name the document number, so a renumbered document renames them too.
+    renamed_payments = []
+    if number != document.number:
+        renamed_payments = [payment.journal_entry for payment in document.payments.select_related("journal_entry")]
+        for payment_entry in renamed_payments:
+            ensure_period_open(payment_entry.date)
+    before = document_snapshot(document)
+    entry_before = entry_snapshot(entry)
+    if entry.date != issue_date:
+        entry.number = next_entry_number(issue_date)
+    entry.date = issue_date
+    entry.description = document_entry_description(document.kind, number, description)
+    entry.contact = contact
+    entry.version += 1
+    entry.save()
+    entry.lines.all().delete()
+    for index, line in enumerate(lines):
+        JournalLine.objects.create(entry=entry, sort_order=index, **line)
+    validate_entry(entry)
+    if attachment:
+        add_attachment(entry, attachment, user)
+    document.number = number
+    document.contact = contact
+    document.issue_date = issue_date
+    document.due_date = due_date
+    document.description = description
+    document.amount = amount
+    document.control_account = control_account
+    document.category_account = category_account
+    if paid >= amount:
+        document.status = BusinessDocument.Status.PAID
+    else:
+        document.status = BusinessDocument.Status.PARTIAL if paid else BusinessDocument.Status.OPEN
+    document.save()
+    record_audit(user, "updated", entry, before=entry_before, after=entry_snapshot(entry))
+    for payment_entry in renamed_payments:
+        payment_before = entry_snapshot(payment_entry)
+        payment_entry.description = payment_entry_description(document.kind, number)
+        payment_entry.version += 1
+        payment_entry.save(update_fields=["description", "version", "updated_at"])
+        record_audit(user, "updated", payment_entry, before=payment_before, after=entry_snapshot(payment_entry))
+    record_audit(user, "updated", document, before=before, after=document_snapshot(document))
+    return document
+
+
+@transaction.atomic
 def create_payment(*, document, payment_date, amount, cash_account, user, memo="", attachment=None):
     document = BusinessDocument.objects.select_for_update().get(pk=document.pk)
     amount = Decimal(amount)
@@ -293,16 +392,14 @@ def create_payment(*, document, payment_date, amount, cash_account, user, memo="
             {"account": cash_account, "debit": amount, "credit": 0, "owner": None},
             {"account": document.control_account, "debit": 0, "credit": amount, "owner": None},
         ]
-        description = f"Payment received for invoice {document.number}"
     else:
         lines = [
             {"account": document.control_account, "debit": amount, "credit": 0, "owner": None},
             {"account": cash_account, "debit": 0, "credit": amount, "owner": None},
         ]
-        description = f"Payment made for bill {document.number}"
     entry = create_entry(
         entry_date=payment_date,
-        description=description,
+        description=payment_entry_description(document.kind, document.number),
         memo=memo,
         lines=lines,
         user=user,

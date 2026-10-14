@@ -17,7 +17,7 @@ from .forms import AccountForm, AccountingPeriodForm, BusinessDocumentForm, Cont
 from .models import Account, AccountingPeriod, AuditEvent, BusinessDocument, Contact, JournalEntry, JournalLine, OwnerActivity, UserProfile
 from .permissions import ROLE_LEVEL, user_role
 from .reporting import account_rows, aging, balance_sheet, income_statement, owner_balances, trial_balance
-from .services import can_delete_entry, create_document, create_entry, create_owner_activity, create_payment, delete_entry, record_audit, restore_entry, update_entry
+from .services import can_delete_entry, can_edit_document, create_document, create_entry, create_owner_activity, create_payment, delete_entry, record_audit, restore_entry, update_document, update_entry
 from . import updates
 
 
@@ -124,8 +124,22 @@ def contact_json(contact):
     }
 
 
+def entry_edit_url(entry):
+    """Where to edit this entry, or None. Invoice and bill entries are edited through their document."""
+    if entry.is_deleted:
+        return None
+    if entry.source == JournalEntry.Source.GENERAL:
+        return f"/transactions/{entry.pk}/edit/"
+    if entry.source in (JournalEntry.Source.INVOICE, JournalEntry.Source.BILL):
+        document = getattr(entry, "business_document", None)
+        if document and can_edit_document(document):
+            return f"/documents/{document.pk}/edit/"
+    return None
+
+
 def entry_json(entry, detail=False):
     lines = list(entry.lines.all())
+    edit_url = entry_edit_url(entry)
     result = {
         "id": entry.pk,
         "number": entry.number,
@@ -140,7 +154,8 @@ def entry_json(entry, detail=False):
         "linked_entry": {"id": entry.linked_entry_id, "number": entry.linked_entry.number} if entry.linked_entry else None,
         "total": money(sum((line.debit for line in lines), Decimal("0.00"))),
         "version": entry.version,
-        "can_edit": entry.source == JournalEntry.Source.GENERAL and not entry.is_deleted,
+        "can_edit": edit_url is not None,
+        "edit_url": edit_url,
         "can_delete": can_delete_entry(entry),
         "is_deleted": entry.is_deleted,
         "deleted_at": entry.deleted_at.isoformat() if entry.deleted_at else None,
@@ -191,6 +206,7 @@ def document_json(document, detail=False):
     }
     if detail:
         result.update({
+            "can_edit": can_edit_document(document),
             "control_account": account_json(document.control_account),
             "category_account": account_json(document.category_account),
             "payments": [{
@@ -292,7 +308,7 @@ def dashboard_api(request):
     cash = sum((row["balance"] for row in account_rows(end=today) if row["account"].subtype in [Account.Subtype.BANK, Account.Subtype.CASH]), Decimal("0.00"))
     invoices = BusinessDocument.objects.filter(kind=BusinessDocument.Kind.INVOICE).exclude(status__in=[BusinessDocument.Status.PAID, BusinessDocument.Status.VOID])
     bills = BusinessDocument.objects.filter(kind=BusinessDocument.Kind.BILL).exclude(status__in=[BusinessDocument.Status.PAID, BusinessDocument.Status.VOID])
-    recent = JournalEntry.objects.filter(status=JournalEntry.Status.POSTED).select_related("contact", "linked_entry").prefetch_related("lines__account")[:8]
+    recent = JournalEntry.objects.filter(status=JournalEntry.Status.POSTED).select_related("contact", "linked_entry", "business_document").prefetch_related("lines__account")[:8]
     return JsonResponse({
         "metrics": {"cash": money(cash), "receivables": money(sum((item.balance_due for item in invoices), Decimal("0.00"))), "payables": money(sum((item.balance_due for item in bills), Decimal("0.00"))), "net_income": money(pnl["net_income"])},
         "recent_entries": [entry_json(item) for item in recent],
@@ -318,7 +334,7 @@ def parse_lines(data):
 @api_view(methods=("GET", "POST"))
 def transactions_api(request):
     if request.method == "GET":
-        entries = JournalEntry.objects.select_related("contact", "linked_entry").prefetch_related("lines__account")
+        entries = JournalEntry.objects.select_related("contact", "linked_entry", "business_document").prefetch_related("lines__account")
         deleted = request.GET.get("deleted", "")
         if deleted == "only":
             entries = entries.filter(status=JournalEntry.Status.DELETED)
@@ -363,7 +379,7 @@ def transactions_api(request):
 
 @api_view(methods=("GET", "POST", "DELETE"))
 def transaction_api(request, pk):
-    entry = get_object_or_404(JournalEntry.objects.select_related("contact", "linked_entry", "created_by", "posted_by", "deleted_by").prefetch_related("lines__account", "lines__owner", "attachments"), pk=pk)
+    entry = get_object_or_404(JournalEntry.objects.select_related("contact", "linked_entry", "business_document", "created_by", "posted_by", "deleted_by").prefetch_related("lines__account", "lines__owner", "attachments"), pk=pk)
     if request.method == "GET":
         audits = AuditEvent.objects.filter(object_type="ledger.JournalEntry", object_id=str(pk))
         return JsonResponse({"entry": entry_json(entry, detail=True), "audits": [audit_json(item) for item in audits]})
@@ -389,7 +405,7 @@ def transaction_api(request, pk):
 
 @api_view(methods=("POST",), minimum_role=UserProfile.Role.BOOKKEEPER)
 def transaction_restore_api(request, pk):
-    entry = get_object_or_404(JournalEntry.objects.select_related("contact", "linked_entry", "created_by", "posted_by", "deleted_by").prefetch_related("lines__account", "lines__owner", "attachments"), pk=pk)
+    entry = get_object_or_404(JournalEntry.objects.select_related("contact", "linked_entry", "business_document", "created_by", "posted_by", "deleted_by").prefetch_related("lines__account", "lines__owner", "attachments"), pk=pk)
     entry = restore_entry(entry=entry, user=request.user)
     return JsonResponse({"entry": entry_json(entry, detail=True)})
 
@@ -488,9 +504,19 @@ def documents_api(request):
     return JsonResponse({"document": document_json(document, detail=True)}, status=201)
 
 
-@api_view()
+@api_view(methods=("GET", "POST"))
 def document_api(request, pk):
     document = get_object_or_404(BusinessDocument.objects.select_related("contact", "journal_entry", "control_account", "category_account").prefetch_related("payments__journal_entry", "payments__cash_account"), pk=pk)
+    if request.method == "GET":
+        return JsonResponse({"document": document_json(document, detail=True)})
+    if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.BOOKKEEPER]:
+        return JsonResponse({"error": "Bookkeeper access is required."}, status=403)
+    # The form writes cleaned values onto its instance, so give it a copy and let the service work from the stored row.
+    form = BusinessDocumentForm(request_data(request), request.FILES, instance=BusinessDocument.objects.get(pk=pk), kind=document.kind)
+    if not form.is_valid():
+        return JsonResponse({"error": "Please correct the highlighted fields.", "fields": form_payload(form)}, status=400)
+    document = update_document(document=document, user=request.user, attachment=form.cleaned_data.pop("attachment"), **form.cleaned_data)
+    document = BusinessDocument.objects.select_related("contact", "journal_entry", "control_account", "category_account").prefetch_related("payments__journal_entry", "payments__cash_account").get(pk=pk)
     return JsonResponse({"document": document_json(document, detail=True)})
 
 

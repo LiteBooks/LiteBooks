@@ -21,6 +21,7 @@ urlpatterns = [
     path("documents/", spa.spa, name="document-list"),
     path("documents/new/<str:kind>/", spa.spa, name="document-create"),
     path("documents/<int:pk>/", spa.spa, name="document-detail"),
+    path("documents/<int:pk>/edit/", spa.spa, name="document-edit"),
     path("documents/<int:pk>/payment/", spa.spa, name="payment-create"),
     path("owners/", spa.spa, name="owner-list"),
     path("owners/activity/new/", spa.spa, name="owner-activity-create"),

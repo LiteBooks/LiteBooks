@@ -49,6 +49,7 @@ export default function App() {
         <Route path="/documents/" element={<DocumentsList />} />
         <Route path="/documents/new/:kind/" element={<DocumentForm />} />
         <Route path="/documents/:id/" element={<DocumentDetail />} />
+        <Route path="/documents/:id/edit/" element={<DocumentForm />} />
         <Route path="/documents/:id/payment/" element={<PaymentForm />} />
         <Route path="/owners/" element={<OwnersList />} />
         <Route path="/owners/activity/new/" element={<OwnerActivityForm />} />

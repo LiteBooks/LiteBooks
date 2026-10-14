@@ -3,6 +3,7 @@ import { Link as RouterLink, useLocation, useNavigate, useParams } from "react-r
 import { Alert, Box, Button, Card, CardContent, Chip, Link, MenuItem, Paper, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import AddRounded from "@mui/icons-material/AddRounded";
 import AttachFileRounded from "@mui/icons-material/AttachFileRounded";
+import EditRounded from "@mui/icons-material/EditRounded";
 import PaymentsRounded from "@mui/icons-material/PaymentsRounded";
 import { api, formDataFrom } from "../api";
 import { DataTable, DateField, ErrorState, fieldError, formatDate, formatMoney, FormActions, LoadingState, localToday, Page, PageLoading, useApiData } from "../components/Common";
@@ -38,7 +39,10 @@ export function DocumentDetail() {
   if (error) return <Page title="Document" crumbs={[{ label: "Invoices & bills", to: "/documents/" }, { label: "Unavailable" }]}><ErrorState error={error} /></Page>;
   const item = data.document;
   return (
-    <Page title={item.number} eyebrow={`${item.kind_label} · ${item.status_label}`} subtitle={item.contact.name} crumbs={[{ label: "Invoices & bills", to: `/documents/?kind=${item.kind}` }, { label: item.number }]} actions={session.permissions.edit_books && Number(item.balance_due) > 0 && item.status !== "void" && <Button component={RouterLink} to={`/documents/${item.id}/payment/`} variant="contained" startIcon={<PaymentsRounded />}>Record payment</Button>}>
+    <Page title={item.number} eyebrow={`${item.kind_label} · ${item.status_label}`} subtitle={item.contact.name} crumbs={[{ label: "Invoices & bills", to: `/documents/?kind=${item.kind}` }, { label: item.number }]} actions={session.permissions.edit_books && <>
+      {item.can_edit && <Button component={RouterLink} to={`/documents/${item.id}/edit/`} variant="outlined" startIcon={<EditRounded />}>Edit {item.kind_label.toLowerCase()}</Button>}
+      {Number(item.balance_due) > 0 && item.status !== "void" && <Button component={RouterLink} to={`/documents/${item.id}/payment/`} variant="contained" startIcon={<PaymentsRounded />}>Record payment</Button>}
+    </>}>
       <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr 1fr", lg: "repeat(4, 1fr)" }, gap: 2, mb: 3 }}>{[
         ["Issued", formatDate(item.issue_date)], ["Due", formatDate(item.due_date)], ["Total", formatMoney(item.amount)], ["Balance due", formatMoney(item.balance_due)],
       ].map(([label, value]) => <Card key={label}><CardContent><Typography variant="overline" color="text.secondary">{label}</Typography><Typography variant="h2" sx={{ fontVariantNumeric: "tabular-nums" }}>{value}</Typography></CardContent></Card>)}</Box>
@@ -57,37 +61,51 @@ export function DocumentDetail() {
 }
 
 export function DocumentForm() {
-  const { kind } = useParams();
+  const { kind: routeKind, id } = useParams();
   const navigate = useNavigate();
   const { options, refreshOptions, notify } = useApp();
+  const editing = Boolean(id);
+  const detail = useApiData(editing ? `/api/documents/${id}/` : null, [id]);
+  const original = detail.data?.document;
+  const kind = editing ? original?.kind : routeKind;
   const isInvoice = kind === "invoice";
   const [values, setValues] = useState({ kind, number: "", contact: "", issue_date: localToday(), due_date: localToday(), description: "", amount: "", control_account: "", category_account: "" });
   const [file, setFile] = useState(null);
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (original) setValues({ kind: original.kind, number: original.number, contact: original.contact.id, issue_date: original.issue_date, due_date: original.due_date, description: original.description, amount: original.amount, control_account: original.control_account.id, category_account: original.category_account.id });
+  }, [original]);
+  if (editing && detail.loading) return <PageLoading title="Edit document" />;
+  if (editing && detail.error) return <Page title="Edit document"><ErrorState error={detail.error} /></Page>;
+  // Once payments exist they post against this contact and control account, so the server keeps them fixed.
+  const locked = editing && original.payments.length > 0;
   const set = (key) => (event) => setValues({ ...values, [key]: event.target.value });
-  const contacts = options?.contacts.filter((item) => item.is_active && (isInvoice ? ["customer", "both"].includes(item.kind) : ["vendor", "both"].includes(item.kind))) || [];
+  const keep = (item, key) => editing && String(item.id) === String(original[key].id);
+  const contacts = options?.contacts.filter((item) => (item.is_active && (isInvoice ? ["customer", "both"].includes(item.kind) : ["vendor", "both"].includes(item.kind))) || keep(item, "contact")) || [];
   const controls = options?.accounts.filter((item) => item.is_active && item.subtype === (isInvoice ? "accounts_receivable" : "accounts_payable")) || [];
   const categories = options?.accounts.filter((item) => item.is_active && item.type === (isInvoice ? "revenue" : "expense")) || [];
-  const submit = async (event) => { event.preventDefault(); setSaving(true); setErrors({}); try { const response = await api("/api/documents/", { method: "POST", body: formDataFrom(values, file) }); await refreshOptions(); notify(`${isInvoice ? "Invoice" : "Bill"} posted.`); navigate(`/documents/${response.document.id}/`); } catch (error) { setErrors({ ...(error.fields || {}), __all__: error.message }); } finally { setSaving(false); } };
   const label = isInvoice ? "invoice" : "bill";
+  const submit = async (event) => { event.preventDefault(); setSaving(true); setErrors({}); try { const response = await api(editing ? `/api/documents/${id}/` : "/api/documents/", { method: "POST", body: formDataFrom(values, file) }); await refreshOptions(); notify(`${isInvoice ? "Invoice" : "Bill"} ${editing ? "updated" : "posted"}.`); navigate(`/documents/${response.document.id}/`); } catch (error) { setErrors({ ...(error.fields || {}), __all__: error.message }); } finally { setSaving(false); } };
+  const title = editing ? `Edit ${label} ${original.number}` : `New ${label}`;
   return (
-    <Page title={`New ${label}`} eyebrow={isInvoice ? "Accounts receivable" : "Accounts payable"} crumbs={[{ label: "Invoices & bills", to: `/documents/?kind=${kind}` }, { label: `New ${label}` }]}>
+    <Page title={title} eyebrow={isInvoice ? "Accounts receivable" : "Accounts payable"} crumbs={[{ label: "Invoices & bills", to: `/documents/?kind=${kind}` }, ...(editing ? [{ label: original.number, to: `/documents/${id}/` }, { label: "Edit" }] : [{ label: `New ${label}` }])]}>
       <Paper component="form" onSubmit={submit} variant="outlined" sx={{ p: { xs: 2, sm: 3 }, maxWidth: 820 }}>
         {errors.__all__ && <Alert severity="error" sx={{ mb: 2 }}>{errors.__all__}</Alert>}
+        {editing && <Alert severity="info" sx={{ mb: 2 }}>Saving rewrites posted entry {original.journal_entry.number} to match.{locked && ` Payments of ${formatMoney(original.amount_paid)} are recorded, so the ${isInvoice ? "customer" : "vendor"} and control account are fixed and the amount cannot go below that.`}</Alert>}
         <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "repeat(2, 1fr)" }, gap: 2 }}>
           <TextField required label={`${isInvoice ? "Invoice" : "Bill"} number`} value={values.number} onChange={set("number")} error={Boolean(fieldError(errors, "number"))} helperText={fieldError(errors, "number")} />
-          <TextField required select label={isInvoice ? "Customer" : "Vendor"} value={values.contact} onChange={set("contact")} error={Boolean(fieldError(errors, "contact"))} helperText={fieldError(errors, "contact")}><MenuItem value="">Choose contact</MenuItem>{contacts.map((item) => <MenuItem key={item.id} value={item.id}>{item.name}</MenuItem>)}</TextField>
+          <TextField required select label={isInvoice ? "Customer" : "Vendor"} value={values.contact} onChange={set("contact")} disabled={locked} error={Boolean(fieldError(errors, "contact"))} helperText={fieldError(errors, "contact")}><MenuItem value="">Choose contact</MenuItem>{contacts.map((item) => <MenuItem key={item.id} value={item.id}>{item.name}</MenuItem>)}</TextField>
           <DateField required label="Issue date" value={values.issue_date} onChange={(value) => setValues({ ...values, issue_date: value })} />
           <DateField required label="Due date" value={values.due_date} onChange={(value) => setValues({ ...values, due_date: value })} error={Boolean(fieldError(errors, "due_date"))} helperText={fieldError(errors, "due_date")} />
           <TextField required label="Description" value={values.description} onChange={set("description")} sx={{ gridColumn: { sm: "1 / -1" } }} />
           <TextField required type="number" label="Amount" value={values.amount} onChange={set("amount")} slotProps={{ htmlInput: { min: .01, step: .01 } }} />
           <Box />
-          <TextField required select label={isInvoice ? "Accounts receivable account" : "Accounts payable account"} value={values.control_account} onChange={set("control_account")}><MenuItem value="">Choose control account</MenuItem>{controls.map((item) => <MenuItem key={item.id} value={item.id}>{item.display_name}</MenuItem>)}</TextField>
+          <TextField required select label={isInvoice ? "Accounts receivable account" : "Accounts payable account"} value={values.control_account} onChange={set("control_account")} disabled={locked}><MenuItem value="">Choose control account</MenuItem>{controls.map((item) => <MenuItem key={item.id} value={item.id}>{item.display_name}</MenuItem>)}</TextField>
           <TextField required select label={isInvoice ? "Revenue account" : "Expense account"} value={values.category_account} onChange={set("category_account")}><MenuItem value="">Choose category account</MenuItem>{categories.map((item) => <MenuItem key={item.id} value={item.id}>{item.display_name}</MenuItem>)}</TextField>
         </Box>
         <Button component="label" variant="outlined" startIcon={<AttachFileRounded />} sx={{ mt: 2 }}>{file ? file.name : "Add attachment"}<input hidden type="file" accept="application/pdf,image/png,image/jpeg,image/webp" onChange={(event) => setFile(event.target.files?.[0] || null)} /></Button>
-        <FormActions saving={saving} submitLabel={`Post ${label}`} cancelTo={`/documents/?kind=${kind}`} />
+        <FormActions saving={saving} submitLabel={editing ? "Save changes" : `Post ${label}`} cancelTo={editing ? `/documents/${id}/` : `/documents/?kind=${kind}`} />
       </Paper>
     </Page>
   );

@@ -73,7 +73,7 @@ export function TransactionsList() {
         { key: "contact", label: "Contact", render: (row) => row.contact?.name || "—" },
         { key: "source", label: "Source", render: (row) => <Chip size="small" label={row.source_label} variant="outlined" /> },
         { key: "total", label: "Amount", align: "right", render: (row) => <Typography fontWeight={600} color={row.is_deleted ? "text.disabled" : "text.primary"} sx={{ fontVariantNumeric: "tabular-nums", textDecoration: row.is_deleted ? "line-through" : "none" }}>{formatMoney(row.total)}</Typography> },
-        ...(session.permissions.edit_books ? [{ key: "actions", label: "", align: "right", render: (row) => row.can_delete && <Tooltip title="Delete transaction"><IconButton size="small" aria-label={`Delete ${row.number}`} onClick={() => setConfirm(row)}><DeleteOutlineRounded fontSize="small" /></IconButton></Tooltip> }] : []),
+        ...(session.permissions.edit_books ? [{ key: "actions", label: "", align: "right", render: (row) => <Stack direction="row" justifyContent="flex-end">{row.can_edit && <Tooltip title={row.source === "general" ? "Edit transaction" : `Edit ${row.source_label.toLowerCase()}`}><IconButton size="small" component={RouterLink} to={row.edit_url} aria-label={`Edit ${row.number}`}><EditRounded fontSize="small" /></IconButton></Tooltip>}{row.can_delete && <Tooltip title="Delete transaction"><IconButton size="small" aria-label={`Delete ${row.number}`} onClick={() => setConfirm(row)}><DeleteOutlineRounded fontSize="small" /></IconButton></Tooltip>}</Stack> }] : []),
       ]} />}
       {confirm && <DeleteDialog entry={confirm} onClose={() => setConfirm(null)} onDeleted={reload} />}
     </Page>
@@ -100,7 +100,7 @@ export function TransactionDetail() {
   };
   return (
     <Page title={entry.number} eyebrow={`${entry.source_label} · ${entry.status_label}`} subtitle={entry.description} crumbs={[{ label: "Transactions", to: "/transactions/" }, { label: entry.number }]} actions={session.permissions.edit_books && <>
-      {entry.can_edit && <Button component={RouterLink} to={`/transactions/${entry.id}/edit/`} variant="outlined" startIcon={<EditRounded />}>Edit transaction</Button>}
+      {entry.can_edit && <Button component={RouterLink} to={entry.edit_url} variant="outlined" startIcon={<EditRounded />}>{entry.source === "general" ? "Edit transaction" : `Edit ${entry.source_label.toLowerCase()}`}</Button>}
       {entry.can_delete && <Button color="error" variant="outlined" startIcon={<DeleteOutlineRounded />} onClick={() => setConfirm(true)}>Delete</Button>}
       {entry.is_deleted && <Button variant="contained" startIcon={<RestoreRounded />} disabled={restoring} onClick={restore}>Restore</Button>}
     </>}>
@@ -185,7 +185,7 @@ export function TransactionForm() {
         </Box>}
         <Stack direction={{ xs: "column", sm: "row" }} alignItems={{ xs: "stretch", sm: "center" }} justifyContent="space-between" spacing={2} sx={{ mt: 3 }}>
           <Button component="label" variant="outlined" startIcon={<AttachFileRounded />}>{file ? file.name : "Add attachment"}<input hidden type="file" accept="application/pdf,image/png,image/jpeg,image/webp" onChange={(event) => setFile(event.target.files?.[0] || null)} /></Button>
-          <FormActions saving={saving} submitLabel="Post transaction" cancelTo={editing ? `/transactions/${id}/` : "/transactions/"} />
+          <FormActions saving={saving} submitLabel={editing ? "Save changes" : "Post transaction"} cancelTo={editing ? `/transactions/${id}/` : "/transactions/"} />
         </Stack>
       </Paper>
     </Page>

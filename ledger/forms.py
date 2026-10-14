@@ -140,6 +140,9 @@ class BusinessDocumentForm(forms.ModelForm):
             self.fields["control_account"].queryset = Account.objects.filter(subtype=Account.Subtype.PAYABLE, is_active=True)
             self.fields["category_account"].queryset = Account.objects.filter(type=Account.Type.EXPENSE, is_active=True)
             self.fields["category_account"].label = "Expense account"
+        if self.instance.pk:
+            # Editing must not fail just because the original contact was since deactivated.
+            self.fields["contact"].queryset = self.fields["contact"].queryset | Contact.objects.filter(pk=self.instance.contact_id)
 
     def clean(self):
         cleaned = super().clean()
@@ -149,7 +152,7 @@ class BusinessDocumentForm(forms.ModelForm):
 
     def clean_number(self):
         number = self.cleaned_data["number"].strip()
-        if BusinessDocument.objects.filter(kind=self.kind, number=number).exists():
+        if BusinessDocument.objects.filter(kind=self.kind, number=number).exclude(pk=self.instance.pk).exists():
             raise forms.ValidationError(f"That {BusinessDocument.Kind(self.kind).label.lower()} number already exists.")
         return number
 
