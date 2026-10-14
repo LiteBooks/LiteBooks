@@ -3,6 +3,7 @@ from django.contrib import admin
 from .models import (
     Account,
     AccountingPeriod,
+    ApiToken,
     Attachment,
     AuditEvent,
     BusinessDocument,
@@ -26,6 +27,12 @@ class JournalEntryAdmin(admin.ModelAdmin):
     list_filter = ["status", "source", "date"]
     search_fields = ["number", "description", "memo"]
     inlines = [JournalLineInline]
+
+
+@admin.register(ApiToken)
+class ApiTokenAdmin(admin.ModelAdmin):
+    list_display = ["name", "user", "hint", "created_at", "last_used_at"]
+    readonly_fields = ["token_hash", "hint", "created_at", "last_used_at"]
 
 
 for model in [Account, AccountingPeriod, Attachment, AuditEvent, BusinessDocument, Contact, OwnerActivity, Payment, UserProfile]:

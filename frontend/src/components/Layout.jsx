@@ -6,6 +6,7 @@ import {
 } from "@mui/material";
 import AccountBalanceRounded from "@mui/icons-material/AccountBalanceRounded";
 import AssessmentRounded from "@mui/icons-material/AssessmentRounded";
+import AutoAwesomeRounded from "@mui/icons-material/AutoAwesomeRounded";
 import ContactsRounded from "@mui/icons-material/ContactsRounded";
 import DashboardRounded from "@mui/icons-material/DashboardRounded";
 import DescriptionRounded from "@mui/icons-material/DescriptionRounded";
@@ -63,6 +64,7 @@ export default function Layout({ children }) {
       <List sx={{ pt: 1.5 }}>{mainItems.map(([label, to, Icon]) => <NavItem key={to} label={label} to={to} Icon={Icon} onClick={close} />)}</List>
       <Box sx={{ mt: "auto", pb: 1.5 }}>
         {session.permissions.administer && <><NavItem label="Period locks" to="/settings/periods/" Icon={SettingsRounded} onClick={close} /><NavItem label="Users" to="/settings/users/" Icon={PeopleRounded} onClick={close} /><NavItem label="Software update" to="/settings/updates/" Icon={SystemUpdateAltRounded} onClick={close} badge={Boolean(session.update_available)} /></>}
+        <NavItem label="AI access" to="/settings/ai/" Icon={AutoAwesomeRounded} onClick={close} />
         <NavItem label="Audit history" to="/audit/" Icon={FactCheckRounded} onClick={close} />
         <ListItemButton onClick={signOut} sx={{ mx: 1, mt: 0.25, borderRadius: 1, color: "rgba(255,255,255,.78)", "&:hover": { bgcolor: "rgba(255,255,255,.08)" } }}>
           <ListItemIcon sx={{ minWidth: 38, color: "inherit" }}><LogoutRounded fontSize="small" /></ListItemIcon><ListItemText primary="Sign out" primaryTypographyProps={{ fontSize: 14, fontWeight: 600 }} />

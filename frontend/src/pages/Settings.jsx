@@ -5,6 +5,7 @@ import {
   FormControlLabel, MenuItem, Paper, Stack, Switch, TextField, Typography,
 } from "@mui/material";
 import AddRounded from "@mui/icons-material/AddRounded";
+import ContentCopyRounded from "@mui/icons-material/ContentCopyRounded";
 import DeleteOutlineRounded from "@mui/icons-material/DeleteOutlineRounded";
 import EditRounded from "@mui/icons-material/EditRounded";
 import LockOpenRounded from "@mui/icons-material/LockOpenRounded";
@@ -147,6 +148,68 @@ export function ProfilePage() {
         </Stack>
         <FormActions saving={saving} submitLabel="Save profile" cancelTo="/" />
       </Paper>
+    </Page>
+  );
+}
+
+function Snippet({ label, value }) {
+  const { notify } = useApp();
+  const copy = async () => { try { await navigator.clipboard.writeText(value); notify(`${label} copied.`); } catch { notify("Copy failed. Select the text and copy it instead.", "error"); } };
+  return (
+    <Box>
+      <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 0.5 }}><Typography variant="body2" fontWeight={700}>{label}</Typography><Button size="small" startIcon={<ContentCopyRounded />} onClick={copy}>Copy</Button></Stack>
+      <Box component="pre" sx={{ m: 0, p: 1.5, borderRadius: 1, bgcolor: "grey.100", fontSize: 12.5, overflowX: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{value}</Box>
+    </Box>
+  );
+}
+
+export function AiAccessPage() {
+  const { notify, session } = useApp();
+  const { data, loading, error, reload } = useApiData("/api/tokens/", []);
+  const [name, setName] = useState("");
+  const [errors, setErrors] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [issued, setIssued] = useState(null);
+  const [confirm, setConfirm] = useState(null);
+  const endpoint = `${window.location.origin}/mcp/`;
+  const insecure = window.location.protocol === "http:" && !["localhost", "127.0.0.1"].includes(window.location.hostname);
+  const create = async (event) => { event.preventDefault(); setSaving(true); setErrors({}); try { const response = await api("/api/tokens/", { method: "POST", body: { name } }); setIssued(response); setName(""); await reload(); } catch (error) { setErrors({ ...(error.fields || {}), __all__: error.message }); } finally { setSaving(false); } };
+  const revoke = async () => { try { await api(`/api/tokens/${confirm.id}/`, { method: "DELETE" }); notify(`${confirm.name} revoked.`); if (issued?.token.id === confirm.id) setIssued(null); setConfirm(null); await reload(); } catch (error) { notify(error.message, "error"); } };
+  const desktopConfig = issued && JSON.stringify({ mcpServers: { litebooks: { command: "npx", args: ["-y", "mcp-remote", endpoint, "--header", "Authorization:${LITEBOOKS_AUTH}", ...(insecure ? ["--allow-http"] : [])], env: { LITEBOOKS_AUTH: `Bearer ${issued.secret}` } } } }, null, 2);
+  return (
+    <Page title="AI access" eyebrow="Integrations" subtitle="Let an AI assistant such as Claude read your books and import bank statements through the Model Context Protocol." crumbs={[{ label: "Settings" }, { label: "AI access" }]}>
+      <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", xl: "minmax(0, 1.5fr) 380px" }, gap: 3, alignItems: "start" }}>
+        <Stack spacing={3} sx={{ minWidth: 0 }}>
+          {issued && (
+            <Paper variant="outlined" sx={{ p: 2.5, borderColor: "success.light" }}>
+              <Typography variant="h2" sx={{ mb: 1 }}>Connect {issued.token.name}</Typography>
+              <Alert severity="warning" sx={{ mb: 2 }}>This token is shown only once. Anyone who has it can act in LiteBooks as {session.user.name} ({session.user.role_label}).</Alert>
+              <Stack spacing={2}>
+                <Snippet label="Token" value={issued.secret} />
+                <Snippet label="Claude Code" value={`claude mcp add --transport http litebooks ${endpoint} --header "Authorization: Bearer ${issued.secret}"`} />
+                <Snippet label="Claude Desktop and other apps (claude_desktop_config.json)" value={desktopConfig} />
+              </Stack>
+            </Paper>
+          )}
+          {loading ? <LoadingState /> : error ? <ErrorState error={error} /> : <DataTable rows={data.tokens} emptyTitle="No tokens yet" emptyDetail="Create a token for each assistant you connect, so you can revoke one without affecting the others." columns={[
+            { key: "name", label: "Name", render: (row) => <Typography fontWeight={700}>{row.name}</Typography> },
+            { key: "hint", label: "Token", render: (row) => <Typography variant="body2" fontFamily="monospace">…{row.hint}</Typography> },
+            { key: "created_at", label: "Created", render: (row) => formatDate(row.created_at) },
+            { key: "last_used_at", label: "Last used", render: (row) => row.last_used_at ? formatDate(row.last_used_at) : "Never" },
+            { key: "actions", label: "", align: "right", render: (row) => <Button size="small" color="error" startIcon={<DeleteOutlineRounded />} onClick={() => setConfirm(row)}>Revoke</Button> },
+          ]} />}
+        </Stack>
+        <Paper component="form" onSubmit={create} variant="outlined" sx={{ p: 2.5 }}>
+          <Typography variant="h2" sx={{ mb: 1 }}>New token</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>The assistant gets your role: viewers can only read, bookkeepers can import and edit transactions, and administrators can also change the chart of accounts. Imports are checked with a dry run before anything is posted.</Typography>
+          {errors.__all__ && <Alert severity="error" sx={{ mb: 2 }}>{errors.__all__}</Alert>}
+          <Stack spacing={2}>
+            <TextField required label="Name" placeholder="Claude Desktop" value={name} onChange={(event) => setName(event.target.value)} error={Boolean(fieldError(errors, "name"))} helperText={fieldError(errors, "name")} />
+            <Button type="submit" variant="contained" disabled={saving}>Create token</Button>
+          </Stack>
+        </Paper>
+      </Box>
+      <Dialog open={Boolean(confirm)} onClose={() => setConfirm(null)}><DialogTitle>Revoke {confirm?.name}?</DialogTitle><DialogContent><DialogContentText>Assistants using this token lose access immediately.</DialogContentText></DialogContent><DialogActions><Button onClick={() => setConfirm(null)} color="inherit">Cancel</Button><Button onClick={revoke} variant="contained" color="error">Revoke token</Button></DialogActions></Dialog>
     </Page>
   );
 }

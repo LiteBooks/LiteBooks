@@ -14,7 +14,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 
 from .forms import AccountForm, AccountingPeriodForm, BusinessDocumentForm, ContactForm, ProfileForm, UserCreateForm, UserUpdateForm
-from .models import Account, AccountingPeriod, AuditEvent, BusinessDocument, Contact, JournalEntry, JournalLine, OwnerActivity, UserProfile
+from .models import Account, AccountingPeriod, ApiToken, AuditEvent, BusinessDocument, Contact, JournalEntry, JournalLine, OwnerActivity, UserProfile
 from .permissions import ROLE_LEVEL, user_role
 from .reporting import account_rows, aging, balance_sheet, income_statement, owner_balances, trial_balance
 from .services import can_delete_entry, can_edit_document, create_document, create_entry, create_owner_activity, create_payment, delete_entry, record_audit, restore_entry, update_document, update_entry
@@ -108,6 +108,14 @@ def account_json(account, balance=None):
     if balance is not None:
         result["balance"] = money(balance)
     return result
+
+
+def accounts_with_balances(accounts):
+    """Yield (account, balance) pairs, each balance signed toward the account's normal side."""
+    posted = Q(journal_lines__entry__status=JournalEntry.Status.POSTED)
+    for account in accounts.annotate(debits=Sum("journal_lines__debit", filter=posted), credits=Sum("journal_lines__credit", filter=posted)):
+        raw = (account.debits or 0) - (account.credits or 0)
+        yield account, raw if account.normal_balance == "debit" else -raw
 
 
 def contact_json(contact):
@@ -413,12 +421,7 @@ def transaction_restore_api(request, pk):
 @api_view(methods=("GET", "POST"))
 def accounts_api(request):
     if request.method == "GET":
-        rows = []
-        for account in Account.objects.annotate(debits=Sum("journal_lines__debit", filter=Q(journal_lines__entry__status="posted")), credits=Sum("journal_lines__credit", filter=Q(journal_lines__entry__status="posted"))):
-            raw = (account.debits or 0) - (account.credits or 0)
-            balance = raw if account.normal_balance == "debit" else -raw
-            rows.append(account_json(account, balance))
-        return JsonResponse({"accounts": rows})
+        return JsonResponse({"accounts": [account_json(account, balance) for account, balance in accounts_with_balances(Account.objects.all())]})
     if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.ADMIN]:
         return JsonResponse({"error": "Administrator access is required."}, status=403)
     form = AccountForm(request_data(request))
@@ -653,6 +656,37 @@ def user_api(request, pk):
         return JsonResponse({"error": "You cannot deactivate your own login.", "fields": {"is_active": ["Keep your current login active."]}}, status=400)
     user = form.save()
     record_audit(request.user, "updated", user.profile, before=before, after={"username": user.username, "role": user.profile.role, "is_active": user.is_active})
+    return JsonResponse({"ok": True})
+
+
+def token_json(token):
+    return {
+        "id": token.pk,
+        "name": token.name,
+        "hint": token.hint,
+        "created_at": token.created_at.isoformat(),
+        "last_used_at": token.last_used_at.isoformat() if token.last_used_at else None,
+    }
+
+
+@api_view(methods=("GET", "POST"))
+def tokens_api(request):
+    """The signed-in user's own AI access tokens. Each acts with that user's role."""
+    if request.method == "GET":
+        return JsonResponse({"tokens": [token_json(item) for item in request.user.api_tokens.all()]})
+    name = str(request_data(request).get("name", "")).strip()
+    if not name:
+        raise ValidationError({"name": "Give the token a name, such as the assistant it is for."})
+    token, raw = ApiToken.issue(user=request.user, name=name[:80])
+    record_audit(request.user, "created", token, after={"name": token.name, "hint": token.hint})
+    return JsonResponse({"token": token_json(token), "secret": raw}, status=201)
+
+
+@api_view(methods=("DELETE",))
+def token_api(request, pk):
+    token = get_object_or_404(ApiToken, pk=pk, user=request.user)
+    record_audit(request.user, "revoked", token, before={"name": token.name, "hint": token.hint})
+    token.delete()
     return JsonResponse({"ok": True})
 
 

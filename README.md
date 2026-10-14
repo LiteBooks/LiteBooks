@@ -119,6 +119,22 @@ docker compose start
 
 `docker compose down` removes the containers and network but preserves the named data volumes. Do not add `-v` unless you intentionally want to permanently delete the database and every uploaded attachment.
 
+## Connect an AI assistant
+
+LiteBooks has a built-in [Model Context Protocol](https://modelcontextprotocol.io) server at `/mcp/`. With it, an assistant such as Claude can read your chart of accounts, categorize a bank or credit card statement CSV, and import it into the ledger.
+
+1. Open **AI access** in the sidebar and create a token. The assistant acts as you, with your role. Viewers can only read, bookkeepers can import and edit transactions, and administrators can also create and change accounts.
+2. Copy the connection command shown with the token. The token is shown only once. For Claude Code:
+
+   ```bash
+   claude mcp add --transport http litebooks https://books.example.com/mcp/ --header "Authorization: Bearer lb_..."
+   ```
+
+   For Claude Desktop and other apps that start local servers, paste the `claude_desktop_config.json` snippet from the same page. It uses `mcp-remote`, which needs Node.js.
+3. Give the assistant a CSV and ask it to import the statement. It looks up how similar transactions were booked before, proposes a category for each row, and runs a dry run so you can review everything before it posts.
+
+Every import and edit goes through the normal posting rules: entries must balance, closed months reject changes, and the audit history records who made each change. Each imported row stores a reference, so importing an overlapping statement again skips the rows that are already on the books. Revoke a token from **AI access** at any time.
+
 ## Update LiteBooks
 
 LiteBooks updates itself from the web interface. Sign in as an owner and open

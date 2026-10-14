@@ -61,6 +61,7 @@ def entry_snapshot(entry):
         "deleted_reason": entry.deleted_reason,
         "contact_id": entry.contact_id,
         "linked_entry_id": entry.linked_entry_id,
+        "import_ref": entry.import_ref,
         "version": entry.version,
         "lines": [
             {
@@ -112,7 +113,7 @@ def validate_entry(entry):
 
 
 @transaction.atomic
-def create_entry(*, entry_date, description, lines, user, memo="", contact=None, linked_entry=None, source=JournalEntry.Source.GENERAL, attachment=None):
+def create_entry(*, entry_date, description, lines, user, memo="", contact=None, linked_entry=None, source=JournalEntry.Source.GENERAL, attachment=None, import_ref=""):
     ensure_period_open(entry_date)
     if not description.strip():
         raise PostingError("Transaction description is required.")
@@ -124,6 +125,7 @@ def create_entry(*, entry_date, description, lines, user, memo="", contact=None,
         source=source,
         contact=contact,
         linked_entry=linked_entry,
+        import_ref=import_ref,
         created_by=user,
     )
     for index, line in enumerate(lines):

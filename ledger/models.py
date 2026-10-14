@@ -1,7 +1,9 @@
 from calendar import monthrange
 from datetime import date
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
+from secrets import token_urlsafe
 from uuid import uuid4
 
 from django.conf import settings
@@ -188,10 +190,14 @@ class JournalEntry(TimeStampedModel):
     deleted_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.PROTECT, related_name="entries_deleted")
     deleted_at = models.DateTimeField(null=True, blank=True)
     deleted_reason = models.CharField(max_length=240, blank=True)
+    # Identifies the bank statement row an imported entry came from, so importing
+    # an overlapping statement again skips what is already on the books.
+    import_ref = models.CharField(max_length=120, blank=True)
     version = models.PositiveIntegerField(default=1)
 
     class Meta:
         ordering = ["-date", "-number"]
+        constraints = [models.UniqueConstraint(fields=["import_ref"], condition=~Q(import_ref=""), name="unique_import_ref")]
 
     def __str__(self):
         return f"{self.number or 'Draft'} - {self.description}"
@@ -325,6 +331,49 @@ class OwnerActivity(TimeStampedModel):
 
     class Meta:
         ordering = ["-journal_entry__date", "-id"]
+
+
+class ApiToken(models.Model):
+    """A bearer token that lets an AI assistant act as its user over MCP.
+
+    Only a hash is stored. The token itself is shown once, when it is issued,
+    and it carries exactly the role of the user who owns it.
+    """
+
+    PREFIX = "lb_"
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="api_tokens")
+    name = models.CharField(max_length=80)
+    token_hash = models.CharField(max_length=64, unique=True)
+    hint = models.CharField(max_length=12)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.name} ({self.user})"
+
+    @staticmethod
+    def digest(raw):
+        return sha256(raw.encode()).hexdigest()
+
+    @classmethod
+    def issue(cls, *, user, name):
+        raw = cls.PREFIX + token_urlsafe(32)
+        token = cls.objects.create(user=user, name=name, token_hash=cls.digest(raw), hint=raw[-4:])
+        return token, raw
+
+    @classmethod
+    def authenticate(cls, raw):
+        if not raw or not raw.startswith(cls.PREFIX):
+            return None
+        token = cls.objects.select_related("user").filter(token_hash=cls.digest(raw)).first()
+        if not token or not token.user.is_active:
+            return None
+        cls.objects.filter(pk=token.pk).update(last_used_at=timezone.now())
+        return token.user
 
 
 class AuditEvent(models.Model):
