@@ -23,15 +23,16 @@ from hashlib import sha256
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, Sum
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
 from .api import account_json, accounts_with_balances, contact_json, money, validation_payload
 from .forms import AccountForm, ContactForm
-from .models import Account, ApiToken, Contact, JournalEntry, UserProfile
+from .models import Account, ApiToken, BusinessDocument, Contact, JournalEntry, JournalLine, UserProfile
 from .permissions import ROLE_LEVEL, user_role
-from .services import create_entry, delete_entry, record_audit, update_entry
+from .reporting import aging, balance_sheet, income_statement, owner_balances, trial_balance
+from .services import create_entry, delete_entry, record_audit, restore_entry, update_entry
 
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -45,6 +46,10 @@ LiteBooks is a double-entry general ledger for one business. To import a bank or
 3. Call categorization_history with the descriptions so you can book merchants the way they were booked before. Choose a category account for every row from list_accounts. Propose new accounts to the user instead of creating them silently.
 4. Call import_transactions with dry_run=true. Show the user the proposed categories and any errors or possible duplicates. Transfers between two of the business's own accounts appear on both statements, so book them only once.
 5. Only after the user approves, call import_transactions again with the same rows and dry_run=false. Rows already imported are skipped, so re-running an overlapping statement is safe.
+
+For reporting and review, use the report tools (trial_balance, balance_sheet, income_statement, aging_report, owner_balances, general_ledger) rather than adding up search_transactions results yourself. get_transaction shows one entry in full, including its attachments and source document.
+
+Adjusting, accrual, reclassification, and depreciation entries are posted with create_journal_entry. Show the user the proposed lines and get their approval before posting.
 
 Amounts are decimal strings with two places. Dates are ISO 8601 (YYYY-MM-DD). Months that are closed in LiteBooks reject postings.
 """
@@ -164,6 +169,14 @@ def entry_summary(entry):
 
 def entries_queryset():
     return JournalEntry.objects.select_related("contact").prefetch_related("lines__account")
+
+
+def account_ref(account):
+    return {"id": account.pk, "code": account.code, "name": account.name, "type": account.type, "subtype": account.subtype}
+
+
+def optional_date(args, key):
+    return parse_date(args[key], key) if args.get(key) else None
 
 
 # -- Accounts and contacts ----------------------------------------------------
@@ -505,10 +518,27 @@ LINE = {
         "debit": {"type": "string"},
         "credit": {"type": "string"},
         "description": {"type": "string"},
+        "owner_id": {"type": ["integer", "null"], "description": "The owner contact this line belongs to, for owner contribution, draw, and loan accounts. Owner balances are tracked by it."},
     },
     "required": ["account_id"],
     "additionalProperties": False,
 }
+
+
+def parse_lines(raw_lines):
+    lines = []
+    for index, line in enumerate(raw_lines):
+        owner = get_contact(line.get("owner_id"), f"lines.{index}.owner_id")
+        if owner and owner.kind != Contact.Kind.OWNER:
+            raise ToolError(f"lines.{index}.owner_id {owner.pk} is not an owner contact.")
+        lines.append({
+            "account": get_account(line.get("account_id"), f"lines.{index}.account_id"),
+            "description": str(line.get("description") or ""),
+            "debit": parse_amount(line.get("debit") or 0, f"lines.{index}.debit"),
+            "credit": parse_amount(line.get("credit") or 0, f"lines.{index}.credit"),
+            "owner": owner,
+        })
+    return lines
 
 
 @tool(
@@ -529,13 +559,7 @@ LINE = {
 def update_transaction(user, args):
     entry = entries_queryset().get(pk=required(args, "transaction_id"))
     if "lines" in args:
-        lines = [{
-            "account": get_account(line.get("account_id"), f"lines.{index}.account_id"),
-            "description": str(line.get("description") or ""),
-            "debit": parse_amount(line.get("debit") or 0, f"lines.{index}.debit"),
-            "credit": parse_amount(line.get("credit") or 0, f"lines.{index}.credit"),
-            "owner": None,
-        } for index, line in enumerate(args["lines"])]
+        lines = parse_lines(args["lines"])
     else:
         lines = [{"account": line.account, "description": line.description, "debit": line.debit, "credit": line.credit, "owner": line.owner} for line in entry.lines.all()]
     entry = update_entry(
@@ -553,7 +577,7 @@ def update_transaction(user, args):
 
 @tool(
     "delete_transaction",
-    "Delete a general journal transaction. It stays in the audit history and can be restored from the web app.",
+    "Delete a general journal transaction. It stays in the audit history and can be brought back with restore_transaction.",
     {"transaction_id": {"type": "integer"}, "reason": {"type": "string"}},
     required=("transaction_id", "reason"),
     minimum_role=UserProfile.Role.BOOKKEEPER,
@@ -564,6 +588,272 @@ def delete_transaction(user, args):
     entry = entries_queryset().get(pk=required(args, "transaction_id"))
     entry = delete_entry(entry=entry, user=user, reason=str(args.get("reason") or ""))
     return {"transaction": entry_summary(entry)}
+
+
+@tool(
+    "restore_transaction",
+    "Bring back a deleted transaction exactly as it was. Its month must still be open and its accounts active.",
+    {"transaction_id": {"type": "integer"}},
+    required=("transaction_id",),
+    minimum_role=UserProfile.Role.BOOKKEEPER,
+    read_only=False,
+)
+def restore_transaction(user, args):
+    entry = entries_queryset().get(pk=required(args, "transaction_id"))
+    entry = restore_entry(entry=entry, user=user)
+    return {"transaction": entry_summary(entries_queryset().get(pk=entry.pk))}
+
+
+@tool(
+    "create_journal_entry",
+    "Post a general journal entry: adjusting, accrual, reclassification, depreciation, or correcting entries. Lines must balance and touch at least two accounts; each line has a debit or a credit, not both. Propose the entry to the user before posting it.",
+    {
+        "date": {"type": "string", "description": "YYYY-MM-DD. The month must be open."},
+        "description": {"type": "string"},
+        "memo": {"type": "string", "description": "Why the entry was made, for the reviewer."},
+        "contact_id": {"type": ["integer", "null"]},
+        "lines": {"type": "array", "items": LINE, "minItems": 2},
+    },
+    required=("date", "description", "lines"),
+    minimum_role=UserProfile.Role.BOOKKEEPER,
+    read_only=False,
+)
+def create_journal_entry(user, args):
+    entry = create_entry(
+        entry_date=parse_date(required(args, "date")),
+        description=str(required(args, "description")).strip()[:240],
+        memo=str(args.get("memo") or "").strip(),
+        contact=get_contact(args.get("contact_id")),
+        lines=parse_lines(args.get("lines") or []),
+        user=user,
+    )
+    return {"transaction": entry_summary(entries_queryset().get(pk=entry.pk))}
+
+
+@tool(
+    "get_transaction",
+    "Show one transaction in full: its lines, who created, posted, or deleted it, its attachments, the invoice, bill, payment, or owner activity it came from, and any linked transaction.",
+    {"transaction_id": {"type": "integer"}},
+    required=("transaction_id",),
+)
+def get_transaction(user, args):
+    entry = (
+        JournalEntry.objects
+        .select_related("contact", "linked_entry", "created_by", "posted_by", "deleted_by")
+        .prefetch_related("lines__account", "lines__owner", "attachments")
+        .get(pk=required(args, "transaction_id"))
+    )
+    result = entry_summary(entry)
+    for line, data in zip(entry.lines.all(), result["lines"]):
+        data["owner"] = {"id": line.owner_id, "name": line.owner.name} if line.owner else None
+    result.update({
+        "created_by": entry.created_by.username,
+        "posted_by": entry.posted_by.username if entry.posted_by else None,
+        "posted_at": entry.posted_at.isoformat() if entry.posted_at else None,
+        "deleted_by": entry.deleted_by.username if entry.deleted_by else None,
+        "deleted_at": entry.deleted_at.isoformat() if entry.deleted_at else None,
+        "deleted_reason": entry.deleted_reason,
+        "linked_transaction": {"id": entry.linked_entry_id, "number": entry.linked_entry.number} if entry.linked_entry else None,
+        "attachments": [{
+            "id": item.pk,
+            "name": item.original_name,
+            "content_type": item.content_type,
+            "size": item.size,
+            "download_path": f"/attachments/{item.pk}/download/",
+        } for item in entry.attachments.all()],
+        "source_record": source_record(entry),
+    })
+    return {"transaction": result}
+
+
+def source_record(entry):
+    if hasattr(entry, "business_document"):
+        document = entry.business_document
+        return {"type": document.kind, "id": document.pk, "number": document.number, "status": document.status, "amount": money(document.amount), "balance_due": money(document.balance_due)}
+    if hasattr(entry, "payment"):
+        payment = entry.payment
+        return {"type": "payment", "id": payment.pk, "amount": money(payment.amount), "document": {"id": payment.document_id, "kind": payment.document.kind, "number": payment.document.number}}
+    if hasattr(entry, "owner_activity"):
+        activity = entry.owner_activity
+        return {"type": "owner_activity", "id": activity.pk, "kind": activity.kind, "owner": {"id": activity.owner_id, "name": activity.owner.name}}
+    return None
+
+
+# -- Reports ------------------------------------------------------------------
+#
+# Every report counts posted entries only, the same as the web app's reports.
+
+AS_OF = {"as_of": {"type": "string", "description": "YYYY-MM-DD. Defaults to today."}}
+
+
+@tool(
+    "trial_balance",
+    "Every account's debit or credit balance as of a date, with totals. Use it to check that the books balance and as the starting point for review or adjustments.",
+    AS_OF,
+)
+def trial_balance_report(user, args):
+    as_of = optional_date(args, "as_of") or date.today()
+    rows, debits, credits = trial_balance(as_of)
+    return {
+        "as_of": as_of.isoformat(),
+        "rows": [{"account": account_ref(row["account"]), "debit": money(row["debit_balance"]), "credit": money(row["credit_balance"])} for row in rows if row["debit_balance"] or row["credit_balance"]],
+        "total_debits": money(debits),
+        "total_credits": money(credits),
+    }
+
+
+@tool(
+    "balance_sheet",
+    "Assets, liabilities, and equity as of a date. Equity includes current earnings (revenue minus expenses not yet closed to retained earnings).",
+    AS_OF,
+)
+def balance_sheet_report(user, args):
+    as_of = optional_date(args, "as_of") or date.today()
+    groups = balance_sheet(as_of)
+    return {
+        "as_of": as_of.isoformat(),
+        **{key: {
+            "rows": [{"account": account_ref(row["account"]), "balance": money(row["balance"])} for row in group["rows"]],
+            "total": money(group["total"]),
+            **({"current_earnings": money(group["current_earnings"])} if "current_earnings" in group else {}),
+        } for key, group in groups.items()},
+    }
+
+
+@tool(
+    "income_statement",
+    "Profit and loss for a date range: revenue and expense accounts with totals and net income.",
+    {
+        "start": {"type": "string", "description": "YYYY-MM-DD. Defaults to January 1 of the end date's year."},
+        "end": {"type": "string", "description": "YYYY-MM-DD. Defaults to today."},
+    },
+)
+def income_statement_report(user, args):
+    end = optional_date(args, "end") or date.today()
+    start = optional_date(args, "start") or date(end.year, 1, 1)
+    if start > end:
+        raise ToolError("start must be on or before end.")
+    statement = income_statement(start, end)
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "revenue": [{"account": account_ref(row["account"]), "balance": money(row["balance"])} for row in statement["revenue"]],
+        "expenses": [{"account": account_ref(row["account"]), "balance": money(row["balance"])} for row in statement["expenses"]],
+        "revenue_total": money(statement["revenue_total"]),
+        "expense_total": money(statement["expense_total"]),
+        "net_income": money(statement["net_income"]),
+    }
+
+
+@tool(
+    "aging_report",
+    "Unpaid invoices (receivables) or bills (payables) as of a date, bucketed by days past due: current, 1-30, 31-60, 61-90, 90+.",
+    {
+        "kind": {"type": "string", "enum": ["receivables", "payables"]},
+        **AS_OF,
+    },
+    required=("kind",),
+)
+def aging_report(user, args):
+    kinds = {"receivables": BusinessDocument.Kind.INVOICE, "payables": BusinessDocument.Kind.BILL}
+    if args.get("kind") not in kinds:
+        raise ToolError("kind must be receivables or payables.")
+    as_of = optional_date(args, "as_of") or date.today()
+    rows, buckets = aging(kinds[args["kind"]], as_of)
+    return {
+        "kind": args["kind"],
+        "as_of": as_of.isoformat(),
+        "rows": [{
+            "document": {
+                "id": row["document"].pk,
+                "number": row["document"].number,
+                "contact": {"id": row["document"].contact_id, "name": row["document"].contact.name},
+                "issue_date": row["document"].issue_date.isoformat(),
+                "due_date": row["document"].due_date.isoformat(),
+                "amount": money(row["document"].amount),
+            },
+            "days_past_due": row["days"],
+            "bucket": row["bucket"],
+            "balance": money(row["balance"]),
+        } for row in rows],
+        "buckets": {key: money(value) for key, value in buckets.items()},
+        "total": money(sum(buckets.values(), Decimal("0.00"))),
+    }
+
+
+@tool(
+    "owner_balances",
+    "Each owner's cumulative contributions, draws, and what the business owes them on owner loans, as of a date.",
+    AS_OF,
+)
+def owner_balances_report(user, args):
+    as_of = optional_date(args, "as_of") or date.today()
+    return {
+        "as_of": as_of.isoformat(),
+        "owners": [{
+            "owner": {"id": row["owner"].pk, "name": row["owner"].name},
+            "contributions": money(row["contributions"]),
+            "draws": money(row["draws"]),
+            "owed": money(row["owed"]),
+        } for row in owner_balances(as_of)],
+    }
+
+
+@tool(
+    "general_ledger",
+    "Posted journal lines for a date range in date order, optionally for one account. With account_id, each line carries the account's running balance, starting from its balance the day before start.",
+    {
+        "start": {"type": "string", "description": "YYYY-MM-DD. Defaults to January 1 of the end date's year."},
+        "end": {"type": "string", "description": "YYYY-MM-DD. Defaults to today."},
+        "account_id": {"type": "integer"},
+        "limit": {"type": "integer", "default": 500, "minimum": 1, "maximum": 2000},
+    },
+)
+def general_ledger(user, args):
+    end = optional_date(args, "end") or date.today()
+    start = optional_date(args, "start") or date(end.year, 1, 1)
+    if start > end:
+        raise ToolError("start must be on or before end.")
+    limit = min(max(int(args.get("limit") or 500), 1), 2000)
+    posted = JournalLine.objects.filter(entry__status=JournalEntry.Status.POSTED)
+    lines = posted.filter(entry__date__range=(start, end))
+    account = None
+    if args.get("account_id"):
+        account = get_account(args["account_id"])
+        lines = lines.filter(account=account)
+    lines = lines.select_related("entry", "account").order_by("entry__date", "entry__number", "sort_order", "pk")
+    page = list(lines[:limit + 1])
+    truncated = len(page) > limit
+    page = page[:limit]
+
+    result = {"start": start.isoformat(), "end": end.isoformat(), "truncated": truncated}
+    sign = 1
+    balance = Decimal("0.00")
+    if account:
+        sign = 1 if account.normal_balance == "debit" else -1
+        opening = posted.filter(account=account, entry__date__lt=start).aggregate(debits=Sum("debit"), credits=Sum("credit"))
+        balance = sign * ((opening["debits"] or Decimal("0.00")) - (opening["credits"] or Decimal("0.00")))
+        result.update({"account": account_ref(account), "opening_balance": money(balance)})
+    rows = []
+    for line in page:
+        row = {
+            "date": line.entry.date.isoformat(),
+            "transaction": {"id": line.entry_id, "number": line.entry.number},
+            "account": account_ref(line.account),
+            "description": line.description or line.entry.description,
+            "debit": money(line.debit),
+            "credit": money(line.credit),
+        }
+        if account:
+            balance += sign * (line.debit - line.credit)
+            row["balance"] = money(balance)
+        rows.append(row)
+    result["lines"] = rows
+    if account and not truncated:
+        result["closing_balance"] = money(balance)
+    if truncated:
+        result["note"] = f"Only the first {limit} lines are shown. Narrow the date range or raise limit for the rest."
+    return result
 
 
 # -- Transport ----------------------------------------------------------------

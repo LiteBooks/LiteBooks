@@ -7,8 +7,8 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from ledger.models import Account, AccountingPeriod, ApiToken, AuditEvent, JournalEntry, UserProfile
-from ledger.services import create_entry
+from ledger.models import Account, AccountingPeriod, ApiToken, AuditEvent, Contact, JournalEntry, UserProfile
+from ledger.services import create_document, create_entry
 
 
 def make_user(username, role):
@@ -235,6 +235,141 @@ class HistoryAndEditTests(McpTestCase):
         result = self.call("update_transaction", transaction_id=entry.pk, lines=[{"account_id": self.software.pk, "debit": "60"}, {"account_id": self.bank.pk, "credit": "50"}])
         self.assertTrue(result["isError"])
         self.assertIn("must equal", result["content"][0]["text"])
+
+
+class JournalEntryToolTests(McpTestCase):
+    def adjusting_lines(self, amount="120.00"):
+        return [{"account_id": self.software.pk, "debit": amount, "description": "Accrue March license"}, {"account_id": self.card.pk, "credit": amount}]
+
+    def test_bookkeepers_can_post_an_adjusting_entry_with_audit(self):
+        result = self.call("create_journal_entry", date="2026-03-31", description="Accrue software", memo="Invoice arrives in April", lines=self.adjusting_lines())
+        self.assertFalse(result["isError"], result)
+        transaction = result["structuredContent"]["transaction"]
+        entry = JournalEntry.objects.get(pk=transaction["id"])
+        self.assertEqual(entry.status, JournalEntry.Status.POSTED)
+        self.assertEqual(entry.source, JournalEntry.Source.GENERAL)
+        self.assertEqual(entry.memo, "Invoice arrives in April")
+        self.assertEqual([(line["debit"], line["credit"]) for line in transaction["lines"]], [("120.00", "0.00"), ("0.00", "120.00")])
+        self.assertTrue(AuditEvent.objects.filter(action="created", object_id=str(entry.pk), actor=self.user).exists())
+
+    def test_unbalanced_or_closed_month_entries_post_nothing(self):
+        unbalanced = self.call("create_journal_entry", date="2026-03-31", description="Bad", lines=[{"account_id": self.software.pk, "debit": "10"}, {"account_id": self.card.pk, "credit": "9"}])
+        self.assertTrue(unbalanced["isError"])
+        AccountingPeriod.objects.create(year=2026, month=1, closed_at=timezone.now())
+        closed = self.call("create_journal_entry", date="2026-01-15", description="Late", lines=self.adjusting_lines())
+        self.assertTrue(closed["isError"])
+        self.assertFalse(JournalEntry.objects.exists())
+
+    def test_owner_ids_must_name_an_owner(self):
+        result = self.call("create_journal_entry", date="2026-03-31", description="Draw", lines=[
+            {"account_id": self.software.pk, "debit": "5", "owner_id": 999999}, {"account_id": self.bank.pk, "credit": "5"},
+        ])
+        self.assertTrue(result["isError"])
+        self.assertIn("not a contact", result["content"][0]["text"])
+
+    def test_viewers_cannot_post_entries(self):
+        _, viewer = ApiToken.issue(user=make_user("viewer", UserProfile.Role.VIEWER), name="read only")
+        self.assertNotIn("create_journal_entry", self.tool_names(viewer))
+        self.assertNotIn("restore_transaction", self.tool_names(viewer))
+        self.assertIn("get_transaction", self.tool_names(viewer))
+        self.assertIn("trial_balance", self.tool_names(viewer))
+
+    def test_deleted_transactions_can_be_restored(self):
+        entry_id = self.call("create_journal_entry", date="2026-03-31", description="Accrue", lines=self.adjusting_lines())["structuredContent"]["transaction"]["id"]
+        self.call("delete_transaction", transaction_id=entry_id, reason="Wrong month")
+        restored = self.call("restore_transaction", transaction_id=entry_id)
+        self.assertFalse(restored["isError"], restored)
+        self.assertEqual(JournalEntry.objects.get(pk=entry_id).status, JournalEntry.Status.POSTED)
+        again = self.call("restore_transaction", transaction_id=entry_id)
+        self.assertTrue(again["isError"])
+
+    def test_get_transaction_shows_history_and_source(self):
+        entry_id = self.call("create_journal_entry", date="2026-03-31", description="Accrue", lines=self.adjusting_lines())["structuredContent"]["transaction"]["id"]
+        self.call("delete_transaction", transaction_id=entry_id, reason="Wrong month")
+        detail = self.call("get_transaction", transaction_id=entry_id)["structuredContent"]["transaction"]
+        self.assertEqual(detail["created_by"], "books")
+        self.assertEqual(detail["deleted_by"], "books")
+        self.assertEqual(detail["deleted_reason"], "Wrong month")
+        self.assertEqual(detail["attachments"], [])
+        self.assertIsNone(detail["source_record"])
+        self.assertTrue(self.call("get_transaction", transaction_id=999999)["isError"])
+
+
+class ReportToolTests(McpTestCase):
+    def setUp(self):
+        super().setUp()
+        self.receivable = Account.objects.create(code="1200", name="Receivables", type=Account.Type.ASSET, subtype=Account.Subtype.RECEIVABLE)
+        create_entry(entry_date=date(2025, 12, 15), description="Prior year sale", user=self.user, lines=[
+            {"account": self.bank, "debit": 100, "credit": 0, "owner": None},
+            {"account": self.sales, "debit": 0, "credit": 100, "owner": None},
+        ])
+        create_entry(entry_date=date(2026, 2, 10), description="Figma", user=self.user, lines=[
+            {"account": self.software, "debit": 30, "credit": 0, "owner": None},
+            {"account": self.bank, "debit": 0, "credit": 30, "owner": None},
+        ])
+        customer = Contact.objects.create(name="Acme", kind=Contact.Kind.CUSTOMER)
+        create_document(kind="invoice", number="INV-1", contact=customer, issue_date=date(2026, 1, 1), due_date=date(2026, 1, 31), description="Consulting", amount="500.00", control_account=self.receivable, category_account=self.sales, user=self.user)
+
+    def report(self, name, **arguments):
+        result = self.call(name, **arguments)
+        self.assertFalse(result["isError"], result)
+        return result["structuredContent"]
+
+    def test_trial_balance_balances(self):
+        report = self.report("trial_balance", as_of="2026-03-31")
+        self.assertEqual(report["total_debits"], report["total_credits"])
+        self.assertEqual(report["total_debits"], "600.00")
+        codes = {row["account"]["code"] for row in report["rows"]}
+        self.assertEqual(codes, {"1000", "1200", "4000", "6100"})
+
+    def test_balance_sheet_includes_current_earnings(self):
+        report = self.report("balance_sheet", as_of="2026-03-31")
+        self.assertEqual(report["asset"]["total"], "570.00")
+        self.assertEqual(report["equity"]["current_earnings"], "570.00")
+        self.assertEqual(report["equity"]["total"], report["asset"]["total"])
+
+    def test_income_statement_defaults_to_year_to_date(self):
+        report = self.report("income_statement", end="2026-03-31")
+        self.assertEqual(report["start"], "2026-01-01")
+        self.assertEqual(report["revenue_total"], "500.00")
+        self.assertEqual(report["expense_total"], "30.00")
+        self.assertEqual(report["net_income"], "470.00")
+        self.assertTrue(self.call("income_statement", start="2026-04-01", end="2026-03-01")["isError"])
+
+    def test_aging_buckets_unpaid_invoices(self):
+        report = self.report("aging_report", kind="receivables", as_of="2026-03-15")
+        self.assertEqual(report["buckets"]["31-60"], "500.00")
+        self.assertEqual(report["total"], "500.00")
+        self.assertEqual(report["rows"][0]["document"]["number"], "INV-1")
+        self.assertEqual(report["rows"][0]["days_past_due"], 43)
+        self.assertEqual(self.report("aging_report", kind="payables")["rows"], [])
+
+    def test_owner_balances_follow_owner_tagged_lines(self):
+        owner = Contact.objects.create(name="Pat", kind=Contact.Kind.OWNER)
+        draws = Account.objects.create(code="3200", name="Draws", type=Account.Type.EQUITY, subtype=Account.Subtype.OWNER_DRAW)
+        self.call("create_journal_entry", date="2026-03-01", description="Owner draw", lines=[
+            {"account_id": draws.pk, "debit": "40", "owner_id": owner.pk}, {"account_id": self.bank.pk, "credit": "40"},
+        ])
+        owners = self.report("owner_balances")["owners"]
+        self.assertEqual(owners, [{"owner": {"id": owner.pk, "name": "Pat"}, "contributions": "0.00", "draws": "40.00", "owed": "0.00"}])
+
+    def test_general_ledger_runs_an_account_balance_from_its_opening(self):
+        report = self.report("general_ledger", account_id=self.bank.pk, start="2026-01-01", end="2026-12-31")
+        self.assertEqual(report["opening_balance"], "100.00")
+        self.assertEqual([line["balance"] for line in report["lines"]], ["70.00"])
+        self.assertEqual(report["closing_balance"], "70.00")
+        self.assertFalse(report["truncated"])
+
+    def test_general_ledger_says_when_it_is_cut_short(self):
+        report = self.report("general_ledger", start="2025-01-01", end="2026-12-31", limit=3)
+        self.assertEqual(len(report["lines"]), 3)
+        self.assertTrue(report["truncated"])
+        self.assertIn("note", report)
+
+    def test_deleted_entries_drop_out_of_reports(self):
+        figma = JournalEntry.objects.get(description="Figma")
+        self.call("delete_transaction", transaction_id=figma.pk, reason="Duplicate")
+        self.assertEqual(self.report("income_statement", end="2026-03-31")["expense_total"], "0.00")
 
 
 class TokenApiTests(TestCase):
