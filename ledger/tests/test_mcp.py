@@ -7,7 +7,7 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from ledger.models import Account, AccountingPeriod, ApiToken, AuditEvent, BusinessDocument, Contact, JournalEntry, UserProfile
+from ledger.models import Account, AccountingPeriod, ApiToken, AuditEvent, BusinessDocument, Contact, JournalEntry, OwnerActivity, UserProfile
 from ledger.services import create_document, create_entry
 
 
@@ -462,6 +462,82 @@ class DocumentToolTests(McpTestCase):
         names = self.tool_names(viewer)
         self.assertTrue({"list_documents", "get_document"} <= names)
         self.assertFalse({"create_document", "update_document", "record_payment"} & names)
+
+
+class OwnerActivityToolTests(McpTestCase):
+    def setUp(self):
+        super().setUp()
+        self.owner = Contact.objects.create(name="Pat", kind=Contact.Kind.OWNER)
+        self.contributions = Account.objects.create(code="3000", name="Contributions", type=Account.Type.EQUITY, subtype=Account.Subtype.OWNER_CONTRIBUTION)
+        self.draws = Account.objects.create(code="3100", name="Draws", type=Account.Type.EQUITY, subtype=Account.Subtype.OWNER_DRAW)
+        self.loans = Account.objects.create(code="2500", name="Owner loans", type=Account.Type.LIABILITY, subtype=Account.Subtype.OWNER_LOAN_PAYABLE)
+
+    def record(self, kind, amount, offset, date="2026-03-01", **extra):
+        return self.call("record_owner_activity", owner_id=self.owner.pk, kind=kind, date=date, amount=amount, cash_account_id=self.bank.pk, offset_account_id=offset.pk, **extra)
+
+    def ok(self, result):
+        self.assertFalse(result["isError"], result)
+        return result["structuredContent"]
+
+    def balances(self):
+        return self.call("owner_balances")["structuredContent"]["owners"][0]
+
+    def test_activity_posts_owner_tagged_entries_that_feed_owner_balances(self):
+        activity = self.ok(self.record("contribution", "1000", self.contributions, memo="Seed money"))["activity"]
+        self.assertEqual((activity["kind"], activity["memo"], activity["cash_account"]["id"], activity["offset_account"]["id"]), ("contribution", "Seed money", self.bank.pk, self.contributions.pk))
+        entry = JournalEntry.objects.get(pk=activity["transaction"]["id"])
+        self.assertEqual(entry.source, JournalEntry.Source.OWNER)
+        self.assertTrue(all(line.owner_id == self.owner.pk for line in entry.lines.all()))
+        self.ok(self.record("draw", "250", self.draws))
+        self.ok(self.record("loan_in", "400", self.loans))
+        balance = self.balances()
+        self.assertEqual((balance["contributions"], balance["draws"], balance["owed"]), ("1000.00", "250.00", "400.00"))
+
+    def test_mismatched_accounts_non_owners_and_over_repayment_are_refused(self):
+        self.ok(self.record("loan_in", "100", self.loans))
+        self.assertIn("does not match", self.record("draw", "50", self.contributions)["content"][0]["text"])
+        self.assertIn("owes this owner 100.00", self.record("loan_repayment", "150", self.loans)["content"][0]["text"])
+        customer = Contact.objects.create(name="Acme", kind=Contact.Kind.CUSTOMER)
+        not_owner = self.call("record_owner_activity", owner_id=customer.pk, kind="draw", date="2026-03-01", amount="5", cash_account_id=self.bank.pk, offset_account_id=self.draws.pk)
+        self.assertIn("not an owner", not_owner["content"][0]["text"])
+        self.assertEqual(OwnerActivity.objects.count(), 1)
+
+    def test_updates_change_only_what_is_passed(self):
+        activity_id = self.ok(self.record("draw", "250", self.draws, memo="March"))["activity"]["id"]
+        updated = self.ok(self.call("update_owner_activity", activity_id=activity_id, amount="300"))["activity"]
+        self.assertEqual((updated["amount"], updated["memo"], updated["date"], updated["kind"]), ("300.00", "March", "2026-03-01", "draw"))
+        self.assertEqual(self.balances()["draws"], "300.00")
+        self.assertTrue(self.call("update_owner_activity", activity_id=activity_id, kind="contribution")["isError"])
+        switched = self.ok(self.call("update_owner_activity", activity_id=activity_id, kind="contribution", offset_account_id=self.contributions.pk))["activity"]
+        self.assertEqual(switched["kind"], "contribution")
+        self.assertTrue(self.call("update_owner_activity", activity_id=999999, amount="1")["isError"])
+
+    def test_an_edit_cannot_leave_an_owner_over_repaid(self):
+        loan_id = self.ok(self.record("loan_in", "500", self.loans))["activity"]["id"]
+        self.ok(self.record("loan_repayment", "400", self.loans, date="2026-03-05"))
+        refused = self.call("update_owner_activity", activity_id=loan_id, amount="300")
+        self.assertTrue(refused["isError"])
+        self.assertEqual(self.balances()["owed"], "100.00")
+
+    def test_listing_filters_and_skips_deleted(self):
+        self.ok(self.record("contribution", "1000", self.contributions, date="2026-01-10"))
+        draw = self.ok(self.record("draw", "250", self.draws, date="2026-03-01"))["activity"]
+        self.assertEqual([item["kind"] for item in self.ok(self.call("list_owner_activity"))["activities"]], ["draw", "contribution"])
+        self.assertEqual(len(self.ok(self.call("list_owner_activity", kind="draw", start="2026-02-01"))["activities"]), 1)
+        JournalEntry.objects.filter(pk=draw["transaction"]["id"]).update(status=JournalEntry.Status.DELETED)
+        self.assertEqual(len(self.ok(self.call("list_owner_activity"))["activities"]), 1)
+        self.assertEqual(len(self.ok(self.call("list_owner_activity", include_deleted=True))["activities"]), 2)
+
+    def test_get_transaction_points_back_to_the_activity(self):
+        activity = self.ok(self.record("draw", "25", self.draws))["activity"]
+        source = self.call("get_transaction", transaction_id=activity["transaction"]["id"])["structuredContent"]["transaction"]["source_record"]
+        self.assertEqual(source, {"type": "owner_activity", "id": activity["id"], "kind": "draw", "owner": {"id": self.owner.pk, "name": "Pat"}})
+
+    def test_viewers_can_list_but_not_record(self):
+        _, viewer = ApiToken.issue(user=make_user("viewer", UserProfile.Role.VIEWER), name="read only")
+        names = self.tool_names(viewer)
+        self.assertIn("list_owner_activity", names)
+        self.assertFalse({"record_owner_activity", "update_owner_activity"} & names)
 
 
 class TokenApiTests(TestCase):

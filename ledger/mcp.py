@@ -30,10 +30,21 @@ from django.views.decorators.csrf import csrf_exempt
 
 from .api import account_json, accounts_with_balances, contact_json, money, validation_payload
 from .forms import AccountForm, BusinessDocumentForm, ContactForm
-from .models import Account, ApiToken, BusinessDocument, Contact, JournalEntry, JournalLine, UserProfile
+from .models import Account, ApiToken, BusinessDocument, Contact, JournalEntry, JournalLine, OwnerActivity, UserProfile
 from .permissions import ROLE_LEVEL, user_role
 from .reporting import aging, balance_sheet, income_statement, owner_balances, trial_balance
-from .services import create_document, create_entry, create_payment, delete_entry, record_audit, restore_entry, update_document, update_entry
+from .services import (
+    create_document,
+    create_entry,
+    create_owner_activity,
+    create_payment,
+    delete_entry,
+    record_audit,
+    restore_entry,
+    update_document,
+    update_entry,
+    update_owner_activity,
+)
 
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -53,6 +64,8 @@ For reporting and review, use the report tools (trial_balance, balance_sheet, in
 Adjusting, accrual, reclassification, and depreciation entries are posted with create_journal_entry. Show the user the proposed lines and get their approval before posting.
 
 Invoices (money owed to the business) and bills (money it owes) are documents: create them with create_document, never as journal entries, and record what is paid against them with record_payment. Each posts its own journal entry, so the ledger, the document's status, and the aging report stay in step.
+
+Money moving between an owner and the business (equity contributions, draws, loans to the business, and loan repayments) is recorded with record_owner_activity, which tags the owner so owner_balances stays right.
 
 Amounts are decimal strings with two places. Dates are ISO 8601 (YYYY-MM-DD). Months that are closed in LiteBooks reject postings.
 """
@@ -546,7 +559,7 @@ def parse_lines(raw_lines):
 
 @tool(
     "update_transaction",
-    "Edit a general journal transaction, for example to recategorize it. Only the fields you pass change; lines, when given, replace all existing lines and must balance. Invoice and bill entries are edited with update_document; payment and owner entries are edited in the web app.",
+    "Edit a general journal transaction, for example to recategorize it. Only the fields you pass change; lines, when given, replace all existing lines and must balance. Invoice and bill entries are edited with update_document and owner entries with update_owner_activity; payment entries are edited in the web app.",
     {
         "transaction_id": {"type": "integer"},
         "date": {"type": "string", "description": "YYYY-MM-DD"},
@@ -609,7 +622,7 @@ def restore_transaction(user, args):
 
 @tool(
     "create_journal_entry",
-    "Post a general journal entry: adjusting, accrual, reclassification, depreciation, or correcting entries. Lines must balance and touch at least two accounts; each line has a debit or a credit, not both. Propose the entry to the user before posting it. Use create_document for invoices and bills and record_payment for their payments, so receivables and payables stay tied to their documents.",
+    "Post a general journal entry: adjusting, accrual, reclassification, depreciation, or correcting entries. Lines must balance and touch at least two accounts; each line has a debit or a credit, not both. Propose the entry to the user before posting it. Use create_document for invoices and bills, record_payment for their payments, and record_owner_activity for owner contributions, draws, and loans, so those stay tied to their source records.",
     {
         "date": {"type": "string", "description": "YYYY-MM-DD. The month must be open."},
         "description": {"type": "string"},
@@ -875,6 +888,138 @@ def record_payment(user, args):
         user=user,
     )
     return {"payment_transaction_id": payment.journal_entry_id, "document": document_detail(get_document(document.pk))}
+
+
+# -- Owner activity -----------------------------------------------------------
+
+CASH_ONLY = {Account.Subtype.BANK, Account.Subtype.CASH}
+
+
+def owner_activities_queryset():
+    return OwnerActivity.objects.select_related("owner", "journal_entry").prefetch_related("journal_entry__lines__account")
+
+
+def owner_activity_accounts(activity):
+    lines = list(activity.journal_entry.lines.all())
+    cash = next((line.account for line in lines if line.account.subtype in CASH_ONLY), None)
+    offset = next((line.account for line in lines if line.account != cash), None)
+    return cash, offset
+
+
+def owner_activity_summary(activity):
+    entry = activity.journal_entry
+    cash, offset = owner_activity_accounts(activity)
+    return {
+        "id": activity.pk,
+        "owner": {"id": activity.owner_id, "name": activity.owner.name},
+        "kind": activity.kind,
+        "date": entry.date.isoformat(),
+        "amount": money(activity.amount),
+        "cash_account": account_ref(cash) if cash else None,
+        "offset_account": account_ref(offset) if offset else None,
+        "memo": entry.memo,
+        "transaction": {"id": entry.pk, "number": entry.number, "status": entry.status},
+    }
+
+
+def get_owner_activity(pk):
+    try:
+        return owner_activities_queryset().get(pk=pk)
+    except (OwnerActivity.DoesNotExist, ValueError, TypeError) as exc:
+        raise ToolError(f"activity_id {pk!r} is not an owner activity. Call list_owner_activity for valid ids.") from exc
+
+
+def get_owner(pk):
+    owner = get_contact(required({"owner_id": pk}, "owner_id"), "owner_id")
+    if owner.kind != Contact.Kind.OWNER:
+        raise ToolError(f"owner_id {pk!r} is {owner.name}, who is not an owner. Call list_contacts to find owners.")
+    return owner
+
+
+OWNER_ACTIVITY_FIELDS = {
+    "owner_id": {"type": "integer", "description": "A contact of kind owner."},
+    "kind": {"type": "string", "enum": OwnerActivity.Kind.values, "description": "contribution: owner puts equity in. draw: owner takes money out. loan_in: owner lends the business money. loan_repayment: the business repays an owner loan (no more than it owes them)."},
+    "date": {"type": "string", "description": "YYYY-MM-DD. The month must be open."},
+    "amount": {"type": "string", "description": "Positive decimal string."},
+    "cash_account_id": {"type": "integer", "description": "The bank or cash account the money moved through."},
+    "offset_account_id": {"type": "integer", "description": "owner_contribution account for contributions, owner_draw for draws, owner_loan_payable for loans and repayments."},
+    "memo": {"type": "string"},
+}
+
+
+@tool(
+    "list_owner_activity",
+    "List owner contributions, draws, loans, and loan repayments, newest first, with the accounts each used. Deleted ones are left out unless asked for.",
+    {
+        "owner_id": {"type": "integer"},
+        "kind": {"type": "string", "enum": OwnerActivity.Kind.values},
+        "start": {"type": "string", "description": "YYYY-MM-DD"},
+        "end": {"type": "string", "description": "YYYY-MM-DD"},
+        "include_deleted": {"type": "boolean", "default": False},
+        "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 500},
+    },
+)
+def list_owner_activity(user, args):
+    activities = owner_activities_queryset()
+    if not args.get("include_deleted"):
+        activities = activities.exclude(journal_entry__status=JournalEntry.Status.DELETED)
+    if args.get("owner_id"):
+        activities = activities.filter(owner_id=args["owner_id"])
+    if args.get("kind"):
+        activities = activities.filter(kind=args["kind"])
+    if args.get("start"):
+        activities = activities.filter(journal_entry__date__gte=parse_date(args["start"], "start"))
+    if args.get("end"):
+        activities = activities.filter(journal_entry__date__lte=parse_date(args["end"], "end"))
+    limit = min(max(int(args.get("limit") or 100), 1), 500)
+    return {"activities": [owner_activity_summary(item) for item in activities[:limit]]}
+
+
+@tool(
+    "record_owner_activity",
+    "Record money moving between an owner and the business and post its journal entry, tagged to the owner. Confirm the details with the user first.",
+    OWNER_ACTIVITY_FIELDS,
+    required=("owner_id", "kind", "date", "amount", "cash_account_id", "offset_account_id"),
+    minimum_role=UserProfile.Role.BOOKKEEPER,
+    read_only=False,
+)
+def record_owner_activity(user, args):
+    activity = create_owner_activity(
+        owner=get_owner(args.get("owner_id")),
+        kind=required(args, "kind"),
+        activity_date=parse_date(required(args, "date")),
+        amount=parse_amount(required(args, "amount")),
+        cash_account=get_account(required(args, "cash_account_id"), "cash_account_id"),
+        offset_account=get_account(required(args, "offset_account_id"), "offset_account_id"),
+        memo=str(args.get("memo") or "").strip(),
+        user=user,
+    )
+    return {"activity": owner_activity_summary(get_owner_activity(activity.pk))}
+
+
+@tool(
+    "update_owner_activity",
+    "Edit an owner contribution, draw, loan, or repayment; only the fields you pass change, and its journal entry is rewritten to match. An edit may not leave an owner repaid more than they lent.",
+    {"activity_id": {"type": "integer"}, **OWNER_ACTIVITY_FIELDS},
+    required=("activity_id",),
+    minimum_role=UserProfile.Role.BOOKKEEPER,
+    read_only=False,
+)
+def update_owner_activity_tool(user, args):
+    activity = get_owner_activity(required(args, "activity_id"))
+    cash, offset = owner_activity_accounts(activity)
+    update_owner_activity(
+        activity=activity,
+        owner=get_owner(args["owner_id"]) if "owner_id" in args else activity.owner,
+        kind=args.get("kind", activity.kind),
+        activity_date=parse_date(args["date"]) if "date" in args else activity.journal_entry.date,
+        amount=parse_amount(args["amount"]) if "amount" in args else activity.amount,
+        cash_account=get_account(args["cash_account_id"], "cash_account_id") if "cash_account_id" in args else cash,
+        offset_account=get_account(args["offset_account_id"], "offset_account_id") if "offset_account_id" in args else offset,
+        memo=str(args.get("memo", activity.journal_entry.memo)).strip(),
+        user=user,
+    )
+    return {"activity": owner_activity_summary(get_owner_activity(activity.pk))}
 
 
 # -- Reports ------------------------------------------------------------------
