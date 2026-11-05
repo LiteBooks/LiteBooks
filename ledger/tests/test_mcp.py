@@ -7,7 +7,7 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from ledger.models import Account, AccountingPeriod, ApiToken, AuditEvent, Contact, JournalEntry, UserProfile
+from ledger.models import Account, AccountingPeriod, ApiToken, AuditEvent, BusinessDocument, Contact, JournalEntry, UserProfile
 from ledger.services import create_document, create_entry
 
 
@@ -370,6 +370,98 @@ class ReportToolTests(McpTestCase):
         figma = JournalEntry.objects.get(description="Figma")
         self.call("delete_transaction", transaction_id=figma.pk, reason="Duplicate")
         self.assertEqual(self.report("income_statement", end="2026-03-31")["expense_total"], "0.00")
+
+
+class DocumentToolTests(McpTestCase):
+    def setUp(self):
+        super().setUp()
+        self.receivable = Account.objects.create(code="1200", name="Receivables", type=Account.Type.ASSET, subtype=Account.Subtype.RECEIVABLE)
+        self.payable = Account.objects.create(code="2000", name="Payables", type=Account.Type.LIABILITY, subtype=Account.Subtype.PAYABLE)
+        self.customer = Contact.objects.create(name="Acme", kind=Contact.Kind.CUSTOMER)
+        self.vendor = Contact.objects.create(name="Figma", kind=Contact.Kind.VENDOR)
+
+    def invoice_args(self, **overrides):
+        return {
+            "kind": "invoice", "number": "INV-1", "contact_id": self.customer.pk, "issue_date": "2026-03-01", "due_date": "2026-03-31",
+            "description": "Consulting", "amount": "500.00", "control_account_id": self.receivable.pk, "category_account_id": self.sales.pk,
+            **overrides,
+        }
+
+    def ok(self, tool_name, **arguments):
+        result = self.call(tool_name, **arguments)
+        self.assertFalse(result["isError"], result)
+        return result["structuredContent"]
+
+    def test_creating_an_invoice_posts_its_entry(self):
+        document = self.ok("create_document", **self.invoice_args())["document"]
+        self.assertEqual((document["status"], document["balance_due"], document["payments"]), ("open", "500.00", []))
+        entry = JournalEntry.objects.get(pk=document["transaction"]["id"])
+        self.assertEqual(entry.source, JournalEntry.Source.INVOICE)
+        self.assertEqual({(line.account_id, line.debit, line.credit) for line in entry.lines.all()}, {(self.receivable.pk, Decimal("500.00"), Decimal("0.00")), (self.sales.pk, Decimal("0.00"), Decimal("500.00"))})
+
+    def test_documents_follow_the_web_apps_rules(self):
+        self.ok("create_document", **self.invoice_args())
+        cases = {
+            "number": self.invoice_args(),  # duplicate number
+            "contact_id": self.invoice_args(number="INV-2", contact_id=self.vendor.pk),  # a vendor cannot be invoiced
+            "category_account_id": self.invoice_args(number="INV-3", category_account_id=self.software.pk),  # expense on an invoice
+            "due_date": self.invoice_args(number="INV-4", due_date="2026-02-01"),  # due before issued
+        }
+        for field, arguments in cases.items():
+            result = self.call("create_document", **arguments)
+            self.assertTrue(result["isError"], field)
+            self.assertIn(f"{field}:", result["content"][0]["text"])
+        self.assertEqual(BusinessDocument.objects.count(), 1)
+
+    def test_bills_need_payable_and_expense_accounts(self):
+        bill = self.ok("create_document", kind="bill", number="B-7", contact_id=self.vendor.pk, issue_date="2026-03-02", due_date="2026-04-01", description="Seats", amount="90", control_account_id=self.payable.pk, category_account_id=self.software.pk)["document"]
+        self.assertEqual(bill["kind"], "bill")
+        wrong = self.call("create_document", kind="bill", number="B-8", contact_id=self.vendor.pk, issue_date="2026-03-02", due_date="2026-04-01", description="Seats", amount="90", control_account_id=self.receivable.pk, category_account_id=self.software.pk)
+        self.assertTrue(wrong["isError"])
+
+    def test_payments_update_status_and_cannot_overpay(self):
+        document_id = self.ok("create_document", **self.invoice_args())["document"]["id"]
+        partial = self.ok("record_payment", document_id=document_id, date="2026-03-10", amount="200", cash_account_id=self.bank.pk, memo="Check 1001")
+        self.assertEqual((partial["document"]["status"], partial["document"]["balance_due"]), ("partial", "300.00"))
+        self.assertEqual(partial["document"]["payments"][0]["transaction"]["memo"], "Check 1001")
+        self.assertEqual(JournalEntry.objects.get(pk=partial["payment_transaction_id"]).source, JournalEntry.Source.PAYMENT)
+        self.assertTrue(self.call("record_payment", document_id=document_id, date="2026-03-11", amount="300.01", cash_account_id=self.bank.pk)["isError"])
+        self.assertTrue(self.call("record_payment", document_id=document_id, date="2026-03-11", amount="300", cash_account_id=self.card.pk)["isError"])
+        paid = self.ok("record_payment", document_id=document_id, date="2026-03-11", amount="300", cash_account_id=self.bank.pk)
+        self.assertEqual((paid["document"]["status"], paid["document"]["balance_due"]), ("paid", "0.00"))
+
+    def test_updates_change_only_what_is_passed_and_respect_payments(self):
+        document_id = self.ok("create_document", **self.invoice_args())["document"]["id"]
+        updated = self.ok("update_document", document_id=document_id, amount="650.00", description="Consulting, March")["document"]
+        self.assertEqual((updated["amount"], updated["description"], updated["number"]), ("650.00", "Consulting, March", "INV-1"))
+        entry = JournalEntry.objects.get(pk=updated["transaction"]["id"])
+        self.assertEqual(entry.total, Decimal("650.00"))
+        self.ok("record_payment", document_id=document_id, date="2026-03-10", amount="400", cash_account_id=self.bank.pk)
+        self.assertTrue(self.call("update_document", document_id=document_id, amount="300")["isError"])
+        both = Contact.objects.create(name="Both Co", kind=Contact.Kind.BOTH)
+        self.assertTrue(self.call("update_document", document_id=document_id, contact_id=both.pk)["isError"])
+        renumbered = self.ok("update_document", document_id=document_id, number="INV-1A")["document"]
+        self.assertEqual(renumbered["number"], "INV-1A")
+        self.assertIn("INV-1A", JournalEntry.objects.get(source=JournalEntry.Source.PAYMENT).description)
+
+    def test_listing_filters_unpaid_and_overdue(self):
+        first = self.ok("create_document", **self.invoice_args())["document"]["id"]
+        self.ok("create_document", **self.invoice_args(number="INV-2", due_date="2026-06-30", amount="75"))
+        self.ok("record_payment", document_id=first, date="2026-03-05", amount="100", cash_account_id=self.bank.pk)
+        unpaid = self.ok("list_documents", kind="invoice", status="unpaid")["documents"]
+        self.assertEqual({item["number"]: item["balance_due"] for item in unpaid}, {"INV-1": "400.00", "INV-2": "75.00"})
+        overdue = self.ok("list_documents", status="unpaid", due_before="2026-04-15")["documents"]
+        self.assertEqual([item["number"] for item in overdue], ["INV-1"])
+        self.assertEqual(self.ok("list_documents", query="acme", kind="bill")["documents"], [])
+        detail = self.ok("get_document", document_id=first)["document"]
+        self.assertEqual((detail["amount_paid"], len(detail["payments"]), detail["can_edit"]), ("100.00", 1, True))
+        self.assertTrue(self.call("get_document", document_id=999999)["isError"])
+
+    def test_viewers_can_read_documents_but_not_change_them(self):
+        _, viewer = ApiToken.issue(user=make_user("viewer", UserProfile.Role.VIEWER), name="read only")
+        names = self.tool_names(viewer)
+        self.assertTrue({"list_documents", "get_document"} <= names)
+        self.assertFalse({"create_document", "update_document", "record_payment"} & names)
 
 
 class TokenApiTests(TestCase):

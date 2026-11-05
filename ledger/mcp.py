@@ -23,16 +23,17 @@ from hashlib import sha256
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
-from django.db.models import Q, Sum
+from django.db.models import DecimalField, Q, Sum, Value
+from django.db.models.functions import Coalesce
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
 from .api import account_json, accounts_with_balances, contact_json, money, validation_payload
-from .forms import AccountForm, ContactForm
+from .forms import AccountForm, BusinessDocumentForm, ContactForm
 from .models import Account, ApiToken, BusinessDocument, Contact, JournalEntry, JournalLine, UserProfile
 from .permissions import ROLE_LEVEL, user_role
 from .reporting import aging, balance_sheet, income_statement, owner_balances, trial_balance
-from .services import create_entry, delete_entry, record_audit, restore_entry, update_entry
+from .services import create_document, create_entry, create_payment, delete_entry, record_audit, restore_entry, update_document, update_entry
 
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -50,6 +51,8 @@ LiteBooks is a double-entry general ledger for one business. To import a bank or
 For reporting and review, use the report tools (trial_balance, balance_sheet, income_statement, aging_report, owner_balances, general_ledger) rather than adding up search_transactions results yourself. get_transaction shows one entry in full, including its attachments and source document.
 
 Adjusting, accrual, reclassification, and depreciation entries are posted with create_journal_entry. Show the user the proposed lines and get their approval before posting.
+
+Invoices (money owed to the business) and bills (money it owes) are documents: create them with create_document, never as journal entries, and record what is paid against them with record_payment. Each posts its own journal entry, so the ledger, the document's status, and the aging report stay in step.
 
 Amounts are decimal strings with two places. Dates are ISO 8601 (YYYY-MM-DD). Months that are closed in LiteBooks reject postings.
 """
@@ -543,7 +546,7 @@ def parse_lines(raw_lines):
 
 @tool(
     "update_transaction",
-    "Edit a general journal transaction, for example to recategorize it. Only the fields you pass change; lines, when given, replace all existing lines and must balance. Invoice, bill, payment, and owner entries are edited from their source in the web app.",
+    "Edit a general journal transaction, for example to recategorize it. Only the fields you pass change; lines, when given, replace all existing lines and must balance. Invoice and bill entries are edited with update_document; payment and owner entries are edited in the web app.",
     {
         "transaction_id": {"type": "integer"},
         "date": {"type": "string", "description": "YYYY-MM-DD"},
@@ -606,7 +609,7 @@ def restore_transaction(user, args):
 
 @tool(
     "create_journal_entry",
-    "Post a general journal entry: adjusting, accrual, reclassification, depreciation, or correcting entries. Lines must balance and touch at least two accounts; each line has a debit or a credit, not both. Propose the entry to the user before posting it.",
+    "Post a general journal entry: adjusting, accrual, reclassification, depreciation, or correcting entries. Lines must balance and touch at least two accounts; each line has a debit or a credit, not both. Propose the entry to the user before posting it. Use create_document for invoices and bills and record_payment for their payments, so receivables and payables stay tied to their documents.",
     {
         "date": {"type": "string", "description": "YYYY-MM-DD. The month must be open."},
         "description": {"type": "string"},
@@ -677,6 +680,201 @@ def source_record(entry):
         activity = entry.owner_activity
         return {"type": "owner_activity", "id": activity.pk, "kind": activity.kind, "owner": {"id": activity.owner_id, "name": activity.owner.name}}
     return None
+
+
+# -- Invoices, bills, and payments --------------------------------------------
+
+PAID = Coalesce(Sum("payments__amount"), Value(Decimal("0.00"), output_field=DecimalField(max_digits=15, decimal_places=2)))
+UNPAID_STATUSES = (BusinessDocument.Status.OPEN, BusinessDocument.Status.PARTIAL)
+
+
+def documents_queryset():
+    return BusinessDocument.objects.select_related("contact", "journal_entry", "control_account", "category_account").annotate(paid=PAID)
+
+
+def document_summary(document):
+    paid = getattr(document, "paid", None)
+    paid = document.amount_paid if paid is None else paid
+    return {
+        "id": document.pk,
+        "kind": document.kind,
+        "number": document.number,
+        "contact": {"id": document.contact_id, "name": document.contact.name},
+        "issue_date": document.issue_date.isoformat(),
+        "due_date": document.due_date.isoformat(),
+        "description": document.description,
+        "amount": money(document.amount),
+        "amount_paid": money(paid),
+        "balance_due": money(document.amount - paid),
+        "status": document.status,
+        "control_account": account_ref(document.control_account),
+        "category_account": account_ref(document.category_account),
+        "transaction": {"id": document.journal_entry_id, "number": document.journal_entry.number},
+    }
+
+
+def document_detail(document):
+    result = document_summary(document)
+    result["can_edit"] = document.status != BusinessDocument.Status.VOID and not document.journal_entry.is_deleted
+    result["payments"] = [{
+        "id": payment.pk,
+        "date": payment.date.isoformat(),
+        "amount": money(payment.amount),
+        "cash_account": account_ref(payment.cash_account),
+        "transaction": {"id": payment.journal_entry_id, "number": payment.journal_entry.number, "memo": payment.journal_entry.memo},
+    } for payment in document.payments.select_related("cash_account", "journal_entry").order_by("date", "pk")]
+    return result
+
+
+def get_document(pk, field="document_id"):
+    try:
+        return documents_queryset().get(pk=pk)
+    except (BusinessDocument.DoesNotExist, ValueError, TypeError) as exc:
+        raise ToolError(f"{field} {pk!r} is not an invoice or bill. Call list_documents for valid ids.") from exc
+
+
+DOCUMENT_FIELDS = {
+    "number": {"type": "string", "description": "Unique per kind, e.g. INV-1042."},
+    "contact_id": {"type": "integer", "description": "A customer for invoices, a vendor for bills (contacts of kind both work for either)."},
+    "issue_date": {"type": "string", "description": "YYYY-MM-DD. The document's journal entry posts on this date, so its month must be open."},
+    "due_date": {"type": "string", "description": "YYYY-MM-DD, on or after issue_date."},
+    "description": {"type": "string"},
+    "amount": {"type": "string", "description": "Total, a positive decimal string."},
+    "control_account_id": {"type": "integer", "description": "Accounts receivable for invoices, accounts payable for bills."},
+    "category_account_id": {"type": "integer", "description": "A revenue account for invoices, an expense account for bills."},
+}
+DOCUMENT_FORM_FIELDS = {
+    "number": "number", "contact_id": "contact", "issue_date": "issue_date", "due_date": "due_date",
+    "description": "description", "amount": "amount", "control_account_id": "control_account", "category_account_id": "category_account",
+}
+
+
+def validated_document_fields(kind, data, instance=None):
+    """Run the web app's form so the MCP tools enforce exactly the same rules."""
+    if "amount" in data:
+        data["amount"] = parse_amount(data["amount"])
+    form = BusinessDocumentForm({DOCUMENT_FORM_FIELDS[key]: value for key, value in data.items()}, instance=instance, kind=kind)
+    if not form.is_valid():
+        errors = form.errors.as_data()
+        renamed = {next((key for key, name in DOCUMENT_FORM_FIELDS.items() if name == field), field): items for field, items in errors.items()}
+        raise ValidationError(renamed)
+    cleaned = dict(form.cleaned_data)
+    cleaned.pop("attachment", None)
+    return cleaned
+
+
+@tool(
+    "list_documents",
+    "List invoices and bills with amount, paid, balance due, and status, newest first. Filter by kind, status, contact, date range, or text.",
+    {
+        "kind": {"type": "string", "enum": BusinessDocument.Kind.values},
+        "status": {"type": "string", "enum": [*BusinessDocument.Status.values, "unpaid"], "description": "unpaid means open or partially paid."},
+        "contact_id": {"type": "integer"},
+        "query": {"type": "string", "description": "Matches number, description, or contact name."},
+        "start": {"type": "string", "description": "Issue date on or after, YYYY-MM-DD."},
+        "end": {"type": "string", "description": "Issue date on or before, YYYY-MM-DD."},
+        "due_before": {"type": "string", "description": "Due date before this day, YYYY-MM-DD. With status=unpaid this lists what is overdue."},
+        "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 500},
+    },
+)
+def list_documents(user, args):
+    documents = documents_queryset()
+    if args.get("kind"):
+        documents = documents.filter(kind=args["kind"])
+    status = args.get("status")
+    if status == "unpaid":
+        documents = documents.filter(status__in=UNPAID_STATUSES)
+    elif status:
+        documents = documents.filter(status=status)
+    if args.get("contact_id"):
+        documents = documents.filter(contact_id=args["contact_id"])
+    if args.get("query"):
+        query = args["query"].strip()
+        documents = documents.filter(Q(number__icontains=query) | Q(description__icontains=query) | Q(contact__name__icontains=query))
+    if args.get("start"):
+        documents = documents.filter(issue_date__gte=parse_date(args["start"], "start"))
+    if args.get("end"):
+        documents = documents.filter(issue_date__lte=parse_date(args["end"], "end"))
+    if args.get("due_before"):
+        documents = documents.filter(due_date__lt=parse_date(args["due_before"], "due_before"))
+    limit = min(max(int(args.get("limit") or 100), 1), 500)
+    return {"documents": [document_summary(item) for item in documents[:limit]]}
+
+
+@tool(
+    "get_document",
+    "Show one invoice or bill in full, including every payment recorded against it and whether it can still be edited.",
+    {"document_id": {"type": "integer"}},
+    required=("document_id",),
+)
+def get_document_tool(user, args):
+    return {"document": document_detail(get_document(required(args, "document_id")))}
+
+
+@tool(
+    "create_document",
+    "Create an invoice or bill and post its journal entry (debit receivable and credit revenue for an invoice; debit expense and credit payable for a bill). Confirm the details with the user before creating it.",
+    {"kind": {"type": "string", "enum": BusinessDocument.Kind.values}, **DOCUMENT_FIELDS},
+    required=("kind", *DOCUMENT_FIELDS),
+    minimum_role=UserProfile.Role.BOOKKEEPER,
+    read_only=False,
+)
+def create_document_tool(user, args):
+    kind = args.get("kind")
+    if kind not in BusinessDocument.Kind.values:
+        raise ToolError("kind must be invoice or bill.")
+    fields = validated_document_fields(kind, {key: args.get(key, "") for key in DOCUMENT_FIELDS})
+    document = create_document(kind=kind, user=user, **fields)
+    return {"document": document_detail(get_document(document.pk))}
+
+
+@tool(
+    "update_document",
+    "Edit an invoice or bill; only the fields you pass change, and its journal entry is rewritten to match. Once a payment is recorded, the contact and control account are fixed and the amount cannot drop below what has been paid. Void documents cannot be edited.",
+    {"document_id": {"type": "integer"}, **DOCUMENT_FIELDS},
+    required=("document_id",),
+    minimum_role=UserProfile.Role.BOOKKEEPER,
+    read_only=False,
+)
+def update_document_tool(user, args):
+    document = get_document(required(args, "document_id"))
+    current = {
+        "number": document.number, "contact_id": document.contact_id, "issue_date": document.issue_date.isoformat(),
+        "due_date": document.due_date.isoformat(), "description": document.description, "amount": str(document.amount),
+        "control_account_id": document.control_account_id, "category_account_id": document.category_account_id,
+    }
+    changes = {key: args[key] for key in DOCUMENT_FIELDS if key in args}
+    # The form writes cleaned values onto its instance, so give it a fresh copy and let the service work from the stored row.
+    fields = validated_document_fields(document.kind, {**current, **changes}, instance=BusinessDocument.objects.get(pk=document.pk))
+    update_document(document=document, user=user, **fields)
+    return {"document": document_detail(get_document(document.pk))}
+
+
+@tool(
+    "record_payment",
+    "Record money received against an invoice or paid against a bill, from or into a bank or cash account. The amount cannot exceed the balance due; partial payments are fine and the document's status follows.",
+    {
+        "document_id": {"type": "integer"},
+        "date": {"type": "string", "description": "YYYY-MM-DD. The month must be open."},
+        "amount": {"type": "string", "description": "Positive decimal string, at most the balance due."},
+        "cash_account_id": {"type": "integer", "description": "A bank or cash account."},
+        "memo": {"type": "string", "description": "e.g. check number or transfer reference."},
+    },
+    required=("document_id", "date", "amount", "cash_account_id"),
+    minimum_role=UserProfile.Role.BOOKKEEPER,
+    read_only=False,
+)
+def record_payment(user, args):
+    document = get_document(required(args, "document_id"))
+    payment = create_payment(
+        document=document,
+        payment_date=parse_date(required(args, "date")),
+        amount=parse_amount(required(args, "amount")),
+        cash_account=get_account(required(args, "cash_account_id"), "cash_account_id"),
+        memo=str(args.get("memo") or "").strip(),
+        user=user,
+    )
+    return {"payment_transaction_id": payment.journal_entry_id, "document": document_detail(get_document(document.pk))}
 
 
 # -- Reports ------------------------------------------------------------------
