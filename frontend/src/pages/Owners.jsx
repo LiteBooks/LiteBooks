@@ -1,11 +1,12 @@
-import { useState } from "react";
-import { Link as RouterLink, useNavigate } from "react-router-dom";
-import { Alert, Box, Button, Link, MenuItem, Paper, Stack, TextField, Typography } from "@mui/material";
+import { useEffect, useState } from "react";
+import { Link as RouterLink, useNavigate, useParams } from "react-router-dom";
+import { Alert, Box, Button, IconButton, Link, MenuItem, Paper, Stack, TextField, Tooltip, Typography } from "@mui/material";
 import AddRounded from "@mui/icons-material/AddRounded";
 import AttachFileRounded from "@mui/icons-material/AttachFileRounded";
+import EditRounded from "@mui/icons-material/EditRounded";
 import PersonAddRounded from "@mui/icons-material/PersonAddRounded";
 import { api, formDataFrom } from "../api";
-import { DataTable, DateField, ErrorState, formatDate, formatMoney, FormActions, LoadingState, localToday, Page, useApiData } from "../components/Common";
+import { DataTable, DateField, ErrorState, formatDate, formatMoney, FormActions, LoadingState, localToday, Page, PageLoading, useApiData } from "../components/Common";
 import { useApp } from "../context";
 
 export function OwnersList() {
@@ -25,6 +26,7 @@ export function OwnersList() {
           { key: "date", label: "Date", render: (row) => formatDate(row.date) }, { key: "owner", label: "Owner", render: (row) => row.owner.name },
           { key: "kind", label: "Type", render: (row) => row.kind_label }, { key: "entry", label: "Entry", render: (row) => <Link component={RouterLink} to={`/transactions/${row.entry.id}/`}>{row.entry.number}</Link> },
           { key: "amount", label: "Amount", align: "right", render: (row) => formatMoney(row.amount) },
+          ...(session.permissions.edit_books ? [{ key: "actions", label: "", align: "right", render: (row) => row.can_edit && <Tooltip title="Edit owner activity"><IconButton size="small" component={RouterLink} to={`/owners/activity/${row.id}/edit/`} aria-label={`Edit ${row.entry.number}`}><EditRounded fontSize="small" /></IconButton></Tooltip> }] : []),
         ]} />
       </>}
     </Page>
@@ -32,16 +34,27 @@ export function OwnersList() {
 }
 
 export function OwnerActivityForm() {
+  const { id } = useParams();
   const navigate = useNavigate();
   const { session, options, notify } = useApp();
+  const editing = Boolean(id);
+  const detail = useApiData(editing ? `/api/owners/activity/${id}/` : null, [id]);
+  const original = detail.data?.activity;
   const [values, setValues] = useState({ owner_id: "", kind: "contribution", date: localToday(), amount: "", cash_account_id: "", offset_account_id: "", memo: "" });
   const [file, setFile] = useState(null);
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
-  const owners = options?.contacts.filter((item) => item.kind === "owner" && item.is_active) || [];
-  const cash = options?.accounts.filter((item) => item.is_active && ["bank", "cash"].includes(item.subtype)) || [];
+  useEffect(() => {
+    if (original) setValues({ owner_id: original.owner.id, kind: original.kind, date: original.date, amount: original.amount, cash_account_id: original.cash_account?.id || "", offset_account_id: original.offset_account?.id || "", memo: original.memo });
+  }, [original]);
+  if (editing && detail.loading) return <PageLoading title="Edit owner activity" />;
+  if (editing && detail.error) return <Page title="Edit owner activity"><ErrorState error={detail.error} /></Page>;
+  // Keep the activity's current owner and accounts selectable even if they have since been deactivated.
+  const keep = (item, key) => editing && String(item.id) === String(original[key]?.id);
+  const owners = options?.contacts.filter((item) => item.kind === "owner" && (item.is_active || keep(item, "owner"))) || [];
+  const cash = options?.accounts.filter((item) => (item.is_active || keep(item, "cash_account")) && ["bank", "cash"].includes(item.subtype)) || [];
   const expectedSubtype = values.kind === "contribution" ? "owner_contribution" : values.kind === "draw" ? "owner_draw" : "owner_loan_payable";
-  const offsets = options?.accounts.filter((item) => item.is_active && item.subtype === expectedSubtype) || [];
+  const offsets = options?.accounts.filter((item) => (item.is_active || keep(item, "offset_account")) && item.subtype === expectedSubtype) || [];
   const offsetLabel = (options?.choices.account_subtypes.find((item) => item.value === expectedSubtype)?.label || "owner equity or loan").toLowerCase();
   const missing = [
     !owners.length && { key: "owners", need: "active owner contact", to: "/contacts/new/?kind=owner", action: "Add an owner", allowed: session.permissions.edit_books, fallback: "Ask a bookkeeper to add one." },
@@ -49,12 +62,13 @@ export function OwnerActivityForm() {
     !offsets.length && { key: "offsets", need: `active ${offsetLabel} account, which this activity type posts against`, to: `/accounts/new/?subtype=${expectedSubtype}`, action: `Add ${/^[aeiou]/.test(offsetLabel) ? "an" : "a"} ${offsetLabel} account`, allowed: session.permissions.administer, fallback: "Ask an administrator to add one." },
   ].filter(Boolean);
   const set = (key) => (event) => setValues({ ...values, [key]: event.target.value });
-  const submit = async (event) => { event.preventDefault(); setSaving(true); setErrors({}); try { const response = await api("/api/owners/", { method: "POST", body: formDataFrom(values, file) }); notify("Owner activity posted."); navigate(`/transactions/${response.entry_id}/`); } catch (error) { setErrors({ ...(error.fields || {}), __all__: error.message }); } finally { setSaving(false); } };
+  const submit = async (event) => { event.preventDefault(); setSaving(true); setErrors({}); try { const response = await api(editing ? `/api/owners/activity/${id}/` : "/api/owners/", { method: "POST", body: formDataFrom(values, file) }); notify(editing ? "Owner activity updated." : "Owner activity posted."); navigate(`/transactions/${response.entry_id}/`); } catch (error) { setErrors({ ...(error.fields || {}), __all__: error.message }); } finally { setSaving(false); } };
+  const title = editing ? `Edit ${original.kind_label.toLowerCase()} ${original.entry.number}` : "New owner activity";
   return (
-    <Page title="New owner activity" eyebrow="Equity and liabilities" crumbs={[{ label: "Owners", to: "/owners/" }, { label: "New activity" }]}>
+    <Page title={title} eyebrow="Equity and liabilities" crumbs={[{ label: "Owners", to: "/owners/" }, ...(editing ? [{ label: original.entry.number, to: `/transactions/${original.entry.id}/` }, { label: "Edit" }] : [{ label: "New activity" }])]}>
       <Paper component="form" onSubmit={submit} variant="outlined" sx={{ p: { xs: 2, sm: 3 }, maxWidth: 760 }}>
         {errors.__all__ && <Alert severity="error" sx={{ mb: 2 }}>{errors.__all__}</Alert>}
-        {missing.length > 0 && <Alert severity="warning" sx={{ mb: 2 }}>
+        {!editing && missing.length > 0 && <Alert severity="warning" sx={{ mb: 2 }}>
           <Typography variant="body2" sx={{ mb: .5 }}>Owner activity cannot be posted until this setup is in place:</Typography>
           <Stack component="ul" spacing={.25} sx={{ m: 0, pl: 2.5 }}>{missing.map((item) => <Typography key={item.key} component="li" variant="body2">
             This ledger has no {item.need}. {item.allowed ? <Link component={RouterLink} to={item.to}>{item.action}</Link> : item.fallback}
@@ -70,7 +84,7 @@ export function OwnerActivityForm() {
           <TextField multiline minRows={3} label="Memo" value={values.memo} onChange={set("memo")} sx={{ gridColumn: { sm: "1 / -1" } }} />
         </Box>
         <Button component="label" variant="outlined" startIcon={<AttachFileRounded />} sx={{ mt: 2 }}>{file ? file.name : "Add attachment"}<input hidden type="file" accept="application/pdf,image/png,image/jpeg,image/webp" onChange={(event) => setFile(event.target.files?.[0] || null)} /></Button>
-        <FormActions saving={saving} submitLabel="Post owner activity" cancelTo="/owners/" />
+        <FormActions saving={saving} submitLabel={editing ? "Save changes" : "Post owner activity"} cancelTo={editing ? `/transactions/${original.entry.id}/` : "/owners/"} />
       </Paper>
     </Page>
   );

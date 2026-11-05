@@ -7,6 +7,7 @@ from django.db.models import Max, Sum
 from django.utils import timezone
 
 from .models import (
+    Account,
     AccountingPeriod,
     Attachment,
     AuditEvent,
@@ -424,9 +425,19 @@ def create_payment(*, document, payment_date, amount, cash_account, user, memo="
     return payment
 
 
-@transaction.atomic
-def create_owner_activity(*, owner, kind, activity_date, amount, cash_account, offset_account, user, memo="", attachment=None):
-    amount = Decimal(amount)
+def owner_loan_outstanding(owner, exclude_entry=None):
+    lines = JournalLine.objects.filter(
+        entry__status=JournalEntry.Status.POSTED,
+        owner=owner,
+        account__subtype=Account.Subtype.OWNER_LOAN_PAYABLE,
+    )
+    if exclude_entry is not None:
+        lines = lines.exclude(entry=exclude_entry)
+    owed = lines.aggregate(credits=Sum("credit"), debits=Sum("debit"))
+    return (owed["credits"] or Decimal("0.00")) - (owed["debits"] or Decimal("0.00"))
+
+
+def owner_activity_lines(*, owner, kind, amount, cash_account, offset_account, exclude_entry=None):
     if amount <= 0:
         raise PostingError("Amount must be greater than zero.")
     if owner.kind != owner.Kind.OWNER:
@@ -439,30 +450,40 @@ def create_owner_activity(*, owner, kind, activity_date, amount, cash_account, o
         OwnerActivity.Kind.LOAN_IN: {offset_account.Subtype.OWNER_LOAN_PAYABLE},
         OwnerActivity.Kind.LOAN_REPAYMENT: {offset_account.Subtype.OWNER_LOAN_PAYABLE},
     }
+    if kind not in expected_subtypes:
+        raise PostingError("Choose a valid owner activity type.")
     if offset_account.subtype not in expected_subtypes[kind]:
         raise PostingError("The owner equity or loan account does not match the selected activity.")
     if kind == OwnerActivity.Kind.LOAN_REPAYMENT:
-        owed = JournalLine.objects.filter(
-            entry__status=JournalEntry.Status.POSTED,
-            owner=owner,
-            account__subtype=offset_account.Subtype.OWNER_LOAN_PAYABLE,
-        ).aggregate(credits=Sum("credit"), debits=Sum("debit"))
-        outstanding = (owed["credits"] or Decimal("0.00")) - (owed["debits"] or Decimal("0.00"))
+        outstanding = owner_loan_outstanding(owner, exclude_entry=exclude_entry)
         if amount > outstanding:
             raise PostingError(f"The business currently owes this owner {outstanding:.2f}.")
     if kind in {OwnerActivity.Kind.CONTRIBUTION, OwnerActivity.Kind.LOAN_IN}:
-        lines = [
+        return [
             {"account": cash_account, "debit": amount, "credit": 0, "owner": owner},
             {"account": offset_account, "debit": 0, "credit": amount, "owner": owner},
         ]
-    else:
-        lines = [
-            {"account": offset_account, "debit": amount, "credit": 0, "owner": owner},
-            {"account": cash_account, "debit": 0, "credit": amount, "owner": owner},
-        ]
+    return [
+        {"account": offset_account, "debit": amount, "credit": 0, "owner": owner},
+        {"account": cash_account, "debit": 0, "credit": amount, "owner": owner},
+    ]
+
+
+def owner_activity_description(kind, owner):
+    return f"{OwnerActivity.Kind(kind).label}: {owner.name}"
+
+
+def owner_activity_snapshot(activity):
+    return {"owner_id": activity.owner_id, "kind": activity.kind, "amount": str(activity.amount)}
+
+
+@transaction.atomic
+def create_owner_activity(*, owner, kind, activity_date, amount, cash_account, offset_account, user, memo="", attachment=None):
+    amount = Decimal(amount)
+    lines = owner_activity_lines(owner=owner, kind=kind, amount=amount, cash_account=cash_account, offset_account=offset_account)
     entry = create_entry(
         entry_date=activity_date,
-        description=f"{OwnerActivity.Kind(kind).label}: {owner.name}",
+        description=owner_activity_description(kind, owner),
         memo=memo,
         lines=lines,
         user=user,
@@ -471,5 +492,50 @@ def create_owner_activity(*, owner, kind, activity_date, amount, cash_account, o
         attachment=attachment,
     )
     activity = OwnerActivity.objects.create(owner=owner, kind=kind, amount=amount, journal_entry=entry)
-    record_audit(user, "created", activity, after={"owner_id": owner.pk, "kind": kind, "amount": str(amount)})
+    record_audit(user, "created", activity, after=owner_activity_snapshot(activity))
+    return activity
+
+
+@transaction.atomic
+def update_owner_activity(*, activity, owner, kind, activity_date, amount, cash_account, offset_account, user, memo="", attachment=None):
+    """Edit an owner contribution, draw, or loan and rewrite its journal entry to match.
+
+    Like documents, the entry is only ever changed through its activity. A
+    repayment may not exceed what the owner is owed apart from itself, and no
+    edit may leave an owner repaid more than they lent.
+    """
+    activity = OwnerActivity.objects.select_for_update().select_related("journal_entry", "owner").get(pk=activity.pk)
+    entry = activity.journal_entry
+    if entry.is_deleted:
+        raise PostingError("This owner activity's transaction is deleted. Restore it before editing.")
+    ensure_period_open(entry.date)
+    ensure_period_open(activity_date)
+    amount = Decimal(amount)
+    lines = owner_activity_lines(owner=owner, kind=kind, amount=amount, cash_account=cash_account, offset_account=offset_account, exclude_entry=entry)
+    before = owner_activity_snapshot(activity)
+    entry_before = entry_snapshot(entry)
+    previous_owner = activity.owner
+    if entry.date != activity_date:
+        entry.number = next_entry_number(activity_date)
+    entry.date = activity_date
+    entry.description = owner_activity_description(kind, owner)
+    entry.memo = memo
+    entry.contact = owner
+    entry.version += 1
+    entry.save()
+    entry.lines.all().delete()
+    for index, line in enumerate(lines):
+        JournalLine.objects.create(entry=entry, sort_order=index, **line)
+    validate_entry(entry)
+    for affected in {previous_owner, owner}:
+        if owner_loan_outstanding(affected) < 0:
+            raise PostingError(f"This change would leave {affected.name} repaid more than they lent the business.")
+    if attachment:
+        add_attachment(entry, attachment, user)
+    activity.owner = owner
+    activity.kind = kind
+    activity.amount = amount
+    activity.save()
+    record_audit(user, "updated", entry, before=entry_before, after=entry_snapshot(entry))
+    record_audit(user, "updated", activity, before=before, after=owner_activity_snapshot(activity))
     return activity

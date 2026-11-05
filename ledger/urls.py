@@ -25,6 +25,7 @@ urlpatterns = [
     path("documents/<int:pk>/payment/", spa.spa, name="payment-create"),
     path("owners/", spa.spa, name="owner-list"),
     path("owners/activity/new/", spa.spa, name="owner-activity-create"),
+    path("owners/activity/<int:pk>/edit/", spa.spa, name="owner-activity-edit"),
     path("reports/", spa.spa, name="reports"),
     path("reports/<slug:report>/", spa.spa, name="report-view"),
     path("settings/periods/", spa.spa, name="period-list"),

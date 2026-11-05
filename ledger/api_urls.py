@@ -21,6 +21,7 @@ urlpatterns = [
     path("documents/<int:pk>/", api.document_api, name="api-document"),
     path("documents/<int:pk>/payment/", api.payment_api, name="api-payment"),
     path("owners/", api.owners_api, name="api-owners"),
+    path("owners/activity/<int:pk>/", api.owner_activity_api, name="api-owner-activity"),
     path("reports/<slug:report>/", api.report_api, name="api-report"),
     path("periods/", api.periods_api, name="api-periods"),
     path("periods/<int:pk>/toggle/", api.period_toggle_api, name="api-period-toggle"),

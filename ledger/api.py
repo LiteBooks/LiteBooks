@@ -17,7 +17,7 @@ from .forms import AccountForm, AccountingPeriodForm, BusinessDocumentForm, Cont
 from .models import Account, AccountingPeriod, ApiToken, AuditEvent, BusinessDocument, Contact, JournalEntry, JournalLine, OwnerActivity, UserProfile
 from .permissions import ROLE_LEVEL, user_role
 from .reporting import account_rows, aging, balance_sheet, income_statement, owner_balances, trial_balance
-from .services import can_delete_entry, can_edit_document, create_document, create_entry, create_owner_activity, create_payment, delete_entry, record_audit, restore_entry, update_document, update_entry
+from .services import can_delete_entry, can_edit_document, create_document, create_entry, create_owner_activity, create_payment, delete_entry, record_audit, restore_entry, update_document, update_entry, update_owner_activity
 from . import updates
 
 
@@ -142,6 +142,10 @@ def entry_edit_url(entry):
         document = getattr(entry, "business_document", None)
         if document and can_edit_document(document):
             return f"/documents/{document.pk}/edit/"
+    if entry.source == JournalEntry.Source.OWNER:
+        activity = getattr(entry, "owner_activity", None)
+        if activity:
+            return f"/owners/activity/{activity.pk}/edit/"
     return None
 
 
@@ -316,7 +320,7 @@ def dashboard_api(request):
     cash = sum((row["balance"] for row in account_rows(end=today) if row["account"].subtype in [Account.Subtype.BANK, Account.Subtype.CASH]), Decimal("0.00"))
     invoices = BusinessDocument.objects.filter(kind=BusinessDocument.Kind.INVOICE).exclude(status__in=[BusinessDocument.Status.PAID, BusinessDocument.Status.VOID])
     bills = BusinessDocument.objects.filter(kind=BusinessDocument.Kind.BILL).exclude(status__in=[BusinessDocument.Status.PAID, BusinessDocument.Status.VOID])
-    recent = JournalEntry.objects.filter(status=JournalEntry.Status.POSTED).select_related("contact", "linked_entry", "business_document").prefetch_related("lines__account")[:8]
+    recent = JournalEntry.objects.filter(status=JournalEntry.Status.POSTED).select_related("contact", "linked_entry", "business_document", "owner_activity").prefetch_related("lines__account")[:8]
     return JsonResponse({
         "metrics": {"cash": money(cash), "receivables": money(sum((item.balance_due for item in invoices), Decimal("0.00"))), "payables": money(sum((item.balance_due for item in bills), Decimal("0.00"))), "net_income": money(pnl["net_income"])},
         "recent_entries": [entry_json(item) for item in recent],
@@ -342,7 +346,7 @@ def parse_lines(data):
 @api_view(methods=("GET", "POST"))
 def transactions_api(request):
     if request.method == "GET":
-        entries = JournalEntry.objects.select_related("contact", "linked_entry", "business_document").prefetch_related("lines__account")
+        entries = JournalEntry.objects.select_related("contact", "linked_entry", "business_document", "owner_activity").prefetch_related("lines__account")
         deleted = request.GET.get("deleted", "")
         if deleted == "only":
             entries = entries.filter(status=JournalEntry.Status.DELETED)
@@ -387,7 +391,7 @@ def transactions_api(request):
 
 @api_view(methods=("GET", "POST", "DELETE"))
 def transaction_api(request, pk):
-    entry = get_object_or_404(JournalEntry.objects.select_related("contact", "linked_entry", "business_document", "created_by", "posted_by", "deleted_by").prefetch_related("lines__account", "lines__owner", "attachments"), pk=pk)
+    entry = get_object_or_404(JournalEntry.objects.select_related("contact", "linked_entry", "business_document", "owner_activity", "created_by", "posted_by", "deleted_by").prefetch_related("lines__account", "lines__owner", "attachments"), pk=pk)
     if request.method == "GET":
         audits = AuditEvent.objects.filter(object_type="ledger.JournalEntry", object_id=str(pk))
         return JsonResponse({"entry": entry_json(entry, detail=True), "audits": [audit_json(item) for item in audits]})
@@ -413,7 +417,7 @@ def transaction_api(request, pk):
 
 @api_view(methods=("POST",), minimum_role=UserProfile.Role.BOOKKEEPER)
 def transaction_restore_api(request, pk):
-    entry = get_object_or_404(JournalEntry.objects.select_related("contact", "linked_entry", "business_document", "created_by", "posted_by", "deleted_by").prefetch_related("lines__account", "lines__owner", "attachments"), pk=pk)
+    entry = get_object_or_404(JournalEntry.objects.select_related("contact", "linked_entry", "business_document", "owner_activity", "created_by", "posted_by", "deleted_by").prefetch_related("lines__account", "lines__owner", "attachments"), pk=pk)
     entry = restore_entry(entry=entry, user=request.user)
     return JsonResponse({"entry": entry_json(entry, detail=True)})
 
@@ -541,13 +545,56 @@ def owners_api(request):
         activities = OwnerActivity.objects.select_related("owner", "journal_entry")[:50]
         return JsonResponse({
             "owners": [{"owner": contact_json(row["owner"]), "contributions": money(row["contributions"]), "draws": money(row["draws"]), "owed": money(row["owed"])} for row in rows],
-            "activities": [{"id": item.pk, "date": item.journal_entry.date.isoformat(), "owner": contact_json(item.owner), "kind": item.kind, "kind_label": item.get_kind_display(), "amount": money(item.amount), "entry": {"id": item.journal_entry_id, "number": item.journal_entry.number}} for item in activities],
+            "activities": [{"id": item.pk, "date": item.journal_entry.date.isoformat(), "owner": contact_json(item.owner), "kind": item.kind, "kind_label": item.get_kind_display(), "amount": money(item.amount), "entry": {"id": item.journal_entry_id, "number": item.journal_entry.number}, "can_edit": not item.journal_entry.is_deleted} for item in activities],
         })
     if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.BOOKKEEPER]:
         return JsonResponse({"error": "Bookkeeper access is required."}, status=403)
     data = request_data(request)
-    activity = create_owner_activity(owner=Contact.objects.get(pk=data.get("owner_id")), kind=data.get("kind"), activity_date=date_value(data.get("date")), amount=decimal_value(data.get("amount")), cash_account=Account.objects.get(pk=data.get("cash_account_id")), offset_account=Account.objects.get(pk=data.get("offset_account_id")), memo=data.get("memo", ""), attachment=request.FILES.get("attachment"), user=request.user)
+    activity = create_owner_activity(user=request.user, **owner_activity_fields(request, data))
     return JsonResponse({"entry_id": activity.journal_entry_id}, status=201)
+
+
+def owner_activity_fields(request, data):
+    return {
+        "owner": Contact.objects.get(pk=data.get("owner_id")),
+        "kind": data.get("kind"),
+        "activity_date": date_value(data.get("date")),
+        "amount": decimal_value(data.get("amount")),
+        "cash_account": Account.objects.get(pk=data.get("cash_account_id")),
+        "offset_account": Account.objects.get(pk=data.get("offset_account_id")),
+        "memo": data.get("memo", ""),
+        "attachment": request.FILES.get("attachment"),
+    }
+
+
+def owner_activity_json(activity):
+    entry = activity.journal_entry
+    lines = list(entry.lines.all())
+    cash = next((line for line in lines if line.account.subtype in {Account.Subtype.BANK, Account.Subtype.CASH}), None)
+    offset = next((line for line in lines if line is not cash), None)
+    return {
+        "id": activity.pk,
+        "owner": contact_json(activity.owner),
+        "kind": activity.kind,
+        "kind_label": activity.get_kind_display(),
+        "date": entry.date.isoformat(),
+        "amount": money(activity.amount),
+        "memo": entry.memo,
+        "cash_account": account_json(cash.account) if cash else None,
+        "offset_account": account_json(offset.account) if offset else None,
+        "entry": {"id": entry.pk, "number": entry.number, "is_deleted": entry.is_deleted},
+    }
+
+
+@api_view(methods=("GET", "POST"))
+def owner_activity_api(request, pk):
+    activity = get_object_or_404(OwnerActivity.objects.select_related("owner", "journal_entry").prefetch_related("journal_entry__lines__account"), pk=pk)
+    if request.method == "GET":
+        return JsonResponse({"activity": owner_activity_json(activity)})
+    if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.BOOKKEEPER]:
+        return JsonResponse({"error": "Bookkeeper access is required."}, status=403)
+    activity = update_owner_activity(activity=activity, user=request.user, **owner_activity_fields(request, request_data(request)))
+    return JsonResponse({"entry_id": activity.journal_entry_id})
 
 
 @api_view()
