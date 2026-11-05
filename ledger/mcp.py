@@ -26,11 +26,24 @@ from django.db import transaction
 from django.db.models import DecimalField, Q, Sum, Value
 from django.db.models.functions import Coalesce
 from django.http import HttpResponse, JsonResponse
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from .api import account_json, accounts_with_balances, contact_json, money, validation_payload
 from .forms import AccountForm, BusinessDocumentForm, ContactForm
-from .models import Account, ApiToken, BusinessDocument, Contact, JournalEntry, JournalLine, OwnerActivity, UserProfile
+from .models import (
+    Account,
+    AccountingPeriod,
+    ApiToken,
+    AuditEvent,
+    BusinessDocument,
+    Contact,
+    JournalEntry,
+    JournalLine,
+    OwnerActivity,
+    Payment,
+    UserProfile,
+)
 from .permissions import ROLE_LEVEL, user_role
 from .reporting import aging, balance_sheet, income_statement, owner_balances, trial_balance
 from .services import (
@@ -67,7 +80,7 @@ Invoices (money owed to the business) and bills (money it owes) are documents: c
 
 Money moving between an owner and the business (equity contributions, draws, loans to the business, and loan repayments) is recorded with record_owner_activity, which tags the owner so owner_balances stays right.
 
-Amounts are decimal strings with two places. Dates are ISO 8601 (YYYY-MM-DD). Months that are closed in LiteBooks reject postings.
+Amounts are decimal strings with two places. Dates are ISO 8601 (YYYY-MM-DD). Months that are closed in LiteBooks reject postings; call list_periods to see which are closed. To trace who changed a record and when, use search_audit_log.
 """
 
 
@@ -288,6 +301,38 @@ def create_contact(user, args):
         raise ValidationError(form.errors.as_data())
     contact = form.save()
     record_audit(user, "created", contact, after=contact_json(contact))
+    return {"contact": contact_json(contact)}
+
+
+CONTACT_FIELDS = ("name", "kind", "email", "phone", "address", "notes", "is_active")
+
+
+@tool(
+    "update_contact",
+    "Edit a customer, vendor, or owner; only the fields you pass change. Set is_active=false to retire a contact without losing its history.",
+    {
+        "contact_id": {"type": "integer"},
+        "name": {"type": "string"},
+        "kind": {"type": "string", "enum": Contact.Kind.values},
+        "email": {"type": "string"},
+        "phone": {"type": "string"},
+        "address": {"type": "string"},
+        "notes": {"type": "string"},
+        "is_active": {"type": "boolean"},
+    },
+    required=("contact_id",),
+    minimum_role=UserProfile.Role.BOOKKEEPER,
+    read_only=False,
+)
+def update_contact(user, args):
+    contact = get_contact(required(args, "contact_id"))
+    before = contact_json(contact)
+    data = {field: args.get(field, getattr(contact, field)) for field in CONTACT_FIELDS}
+    form = ContactForm(data, instance=contact)
+    if not form.is_valid():
+        raise ValidationError(form.errors.as_data())
+    contact = form.save()
+    record_audit(user, "updated", contact, before=before, after=contact_json(contact))
     return {"contact": contact_json(contact)}
 
 
@@ -1020,6 +1065,140 @@ def update_owner_activity_tool(user, args):
         user=user,
     )
     return {"activity": owner_activity_summary(get_owner_activity(activity.pk))}
+
+
+# -- Closing and review -------------------------------------------------------
+
+
+def period_json(year, month, period=None):
+    closed = period is not None and period.is_closed
+    return {
+        "year": year,
+        "month": month,
+        "label": date(year, month, 1).strftime("%B %Y"),
+        "is_closed": closed,
+        "closed_at": period.closed_at.isoformat() if closed else None,
+        "closed_by": period.closed_by.username if closed and period.closed_by else None,
+    }
+
+
+def period_args(args):
+    try:
+        year, month = int(required(args, "year")), int(required(args, "month"))
+        date(year, month, 1)
+    except (ValueError, TypeError) as exc:
+        raise ToolError("year and month must name a real month, e.g. year=2026, month=3.") from exc
+    return year, month
+
+
+@tool(
+    "list_periods",
+    "Show which months are closed. Closed months reject every posting, edit, delete, and restore dated in them. Months never closed are open and are not listed unless they fall within year.",
+    {"year": {"type": "integer", "description": "List all twelve months of this year, open or closed."}},
+)
+def list_periods(user, args):
+    periods = AccountingPeriod.objects.select_related("closed_by")
+    if args.get("year"):
+        year = int(args["year"])
+        stored = {period.month: period for period in periods.filter(year=year)}
+        return {"periods": [period_json(year, month, stored.get(month)) for month in range(1, 13)]}
+    return {"closed_periods": [period_json(period.year, period.month, period) for period in periods if period.is_closed]}
+
+
+def set_period_closed(user, args, closed):
+    year, month = period_args(args)
+    with transaction.atomic():
+        period, _ = AccountingPeriod.objects.select_for_update().get_or_create(year=year, month=month)
+        if period.is_closed == closed:
+            raise ToolError(f"{period} is already {'closed' if closed else 'open'}.")
+        period.closed_at = timezone.now() if closed else None
+        period.closed_by = user if closed else None
+        period.save(update_fields=["closed_at", "closed_by"])
+        record_audit(user, "closed" if closed else "reopened", period, after={"year": year, "month": month, "is_closed": closed})
+    return {"period": period_json(year, month, period)}
+
+
+@tool(
+    "close_period",
+    "Close a month so nothing dated in it can be posted, edited, deleted, or restored. Run the trial balance and get the user's explicit go-ahead first.",
+    {"year": {"type": "integer"}, "month": {"type": "integer", "minimum": 1, "maximum": 12}},
+    required=("year", "month"),
+    minimum_role=UserProfile.Role.ADMIN,
+    read_only=False,
+)
+def close_period(user, args):
+    return set_period_closed(user, args, closed=True)
+
+
+@tool(
+    "reopen_period",
+    "Reopen a closed month so its entries can change again. This undoes a close the business may have reported or filed on, so only do it when the user explicitly asks.",
+    {"year": {"type": "integer"}, "month": {"type": "integer", "minimum": 1, "maximum": 12}},
+    required=("year", "month"),
+    minimum_role=UserProfile.Role.ADMIN,
+    read_only=False,
+    destructive=True,
+)
+def reopen_period(user, args):
+    return set_period_closed(user, args, closed=False)
+
+
+AUDIT_RECORD_TYPES = {
+    "transaction": JournalEntry,
+    "document": BusinessDocument,
+    "payment": Payment,
+    "owner_activity": OwnerActivity,
+    "account": Account,
+    "contact": Contact,
+    "period": AccountingPeriod,
+    "user": UserProfile,
+    "api_token": ApiToken,
+}
+AUDIT_LABELS = {model._meta.label: name for name, model in AUDIT_RECORD_TYPES.items()}
+
+
+@tool(
+    "search_audit_log",
+    "Who changed what and when, newest first, with each record's values before and after. Filter by record type and id (for example a transaction's history), action, user, or date range.",
+    {
+        "record_type": {"type": "string", "enum": list(AUDIT_RECORD_TYPES)},
+        "record_id": {"type": "integer", "description": "With record_type, the history of one record."},
+        "action": {"type": "string", "description": "e.g. created, updated, deleted, restored, closed, reopened."},
+        "username": {"type": "string"},
+        "start": {"type": "string", "description": "YYYY-MM-DD"},
+        "end": {"type": "string", "description": "YYYY-MM-DD"},
+        "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 500},
+    },
+)
+def search_audit_log(user, args):
+    events = AuditEvent.objects.select_related("actor")
+    if args.get("record_type"):
+        if args["record_type"] not in AUDIT_RECORD_TYPES:
+            raise ToolError(f"record_type must be one of: {', '.join(AUDIT_RECORD_TYPES)}.")
+        events = events.filter(object_type=AUDIT_RECORD_TYPES[args["record_type"]]._meta.label)
+    if args.get("record_id") is not None:
+        if not args.get("record_type"):
+            raise ToolError("record_id needs a record_type, since ids are only unique within a type.")
+        events = events.filter(object_id=str(args["record_id"]))
+    if args.get("action"):
+        events = events.filter(action=args["action"].strip())
+    if args.get("username"):
+        events = events.filter(actor__username=args["username"].strip())
+    if args.get("start"):
+        events = events.filter(created_at__date__gte=parse_date(args["start"], "start"))
+    if args.get("end"):
+        events = events.filter(created_at__date__lte=parse_date(args["end"], "end"))
+    limit = min(max(int(args.get("limit") or 100), 1), 500)
+    return {"events": [{
+        "id": event.pk,
+        "at": event.created_at.isoformat(),
+        "user": event.actor.username if event.actor else None,
+        "action": event.action,
+        "record_type": AUDIT_LABELS.get(event.object_type, event.object_type),
+        "record_id": event.object_id,
+        "before": event.before,
+        "after": event.after,
+    } for event in events[:limit]]}
 
 
 # -- Reports ------------------------------------------------------------------

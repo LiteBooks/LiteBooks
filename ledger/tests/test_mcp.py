@@ -540,6 +540,69 @@ class OwnerActivityToolTests(McpTestCase):
         self.assertFalse({"record_owner_activity", "update_owner_activity"} & names)
 
 
+class ReviewToolTests(McpTestCase):
+    def setUp(self):
+        super().setUp()
+        self.admin = make_user("admin", UserProfile.Role.ADMIN)
+        _, self.admin_secret = ApiToken.issue(user=self.admin, name="admin")
+
+    def ok(self, result):
+        self.assertFalse(result["isError"], result)
+        return result["structuredContent"]
+
+    def test_only_admins_close_and_reopen_and_reopen_is_marked_destructive(self):
+        self.assertFalse({"close_period", "reopen_period"} & self.tool_names())
+        self.assertIn("list_periods", self.tool_names())
+        tools = {item["name"]: item for item in self.rpc("tools/list", secret=self.admin_secret).json()["result"]["tools"]}
+        self.assertTrue(tools["reopen_period"]["annotations"]["destructiveHint"])
+        self.assertFalse(tools["close_period"]["annotations"]["destructiveHint"])
+
+    def test_closing_a_month_blocks_postings_until_it_is_reopened(self):
+        closed = self.ok(self.call("close_period", secret=self.admin_secret, year=2026, month=2))["period"]
+        self.assertEqual((closed["label"], closed["is_closed"], closed["closed_by"]), ("February 2026", True, "admin"))
+        self.assertTrue(self.call("close_period", secret=self.admin_secret, year=2026, month=2)["isError"])
+        lines = [{"account_id": self.software.pk, "debit": "10"}, {"account_id": self.bank.pk, "credit": "10"}]
+        self.assertIn("closed", self.call("create_journal_entry", date="2026-02-10", description="Late", lines=lines)["content"][0]["text"])
+        self.assertEqual(self.ok(self.call("list_periods"))["closed_periods"][0]["label"], "February 2026")
+        year = self.ok(self.call("list_periods", year=2026))["periods"]
+        self.assertEqual([month["is_closed"] for month in year[:3]], [False, True, False])
+        self.assertEqual(len(year), 12)
+        self.ok(self.call("reopen_period", secret=self.admin_secret, year=2026, month=2))
+        self.ok(self.call("create_journal_entry", date="2026-02-10", description="Late", lines=lines))
+        self.assertEqual(self.ok(self.call("list_periods"))["closed_periods"], [])
+        actions = [event["action"] for event in self.ok(self.call("search_audit_log", record_type="period"))["events"]]
+        self.assertEqual(actions, ["reopened", "closed"])
+
+    def test_invalid_months_are_refused(self):
+        self.assertTrue(self.call("close_period", secret=self.admin_secret, year=2026, month=13)["isError"])
+        self.assertFalse(AccountingPeriod.objects.exists())
+
+    def test_the_audit_log_traces_one_records_history(self):
+        lines = [{"account_id": self.software.pk, "debit": "10"}, {"account_id": self.bank.pk, "credit": "10"}]
+        first = self.ok(self.call("create_journal_entry", date="2026-03-01", description="Figma", lines=lines))["transaction"]["id"]
+        self.ok(self.call("create_journal_entry", date="2026-03-02", description="Other", lines=lines))
+        self.ok(self.call("update_transaction", transaction_id=first, description="Figma seats"))
+        self.ok(self.call("delete_transaction", transaction_id=first, reason="Duplicate"))
+        history = self.ok(self.call("search_audit_log", record_type="transaction", record_id=first))["events"]
+        self.assertEqual([event["action"] for event in history], ["deleted", "updated", "created"])
+        self.assertTrue(all(event["user"] == "books" and event["record_type"] == "transaction" for event in history))
+        self.assertEqual(history[1]["after"]["description"], "Figma seats")
+        self.assertEqual(len(self.ok(self.call("search_audit_log", action="created", username="books"))["events"]), 2)
+        self.assertEqual(self.ok(self.call("search_audit_log", username="admin"))["events"], [])
+        self.assertTrue(self.call("search_audit_log", record_id=first)["isError"])
+
+    def test_contacts_can_be_edited_and_retired_with_audit(self):
+        contact = self.ok(self.call("create_contact", name="Acme", kind="customer", email="ap@acme.test"))["contact"]
+        updated = self.ok(self.call("update_contact", contact_id=contact["id"], phone="555-0100", kind="both"))["contact"]
+        self.assertEqual((updated["name"], updated["email"], updated["phone"], updated["kind"]), ("Acme", "ap@acme.test", "555-0100", "both"))
+        retired = self.ok(self.call("update_contact", contact_id=contact["id"], is_active=False))["contact"]
+        self.assertFalse(retired["is_active"])
+        self.assertTrue(self.call("update_contact", contact_id=contact["id"], email="not-an-email")["isError"])
+        self.assertTrue(self.call("update_contact", contact_id=999999, name="X")["isError"])
+        event = self.ok(self.call("search_audit_log", record_type="contact", record_id=contact["id"], action="updated"))["events"][-1]
+        self.assertEqual((event["before"]["phone"], event["after"]["phone"]), ("", "555-0100"))
+
+
 class TokenApiTests(TestCase):
     def setUp(self):
         self.user = make_user("books", UserProfile.Role.BOOKKEEPER)
