@@ -55,10 +55,11 @@ class FounderTestCase(McpTestCase):
         super().tearDownClass()
         shutil.rmtree(MEDIA, ignore_errors=True)
 
-    def log(self, owner, paid, logged, amount="40.00", receipts=(), **extra):
+    def log(self, owner, paid, logged, amount="40.00", receipts=(), confirm_duplicate=True, **extra):
+        # Several tests log the same payment at different times on purpose, so duplicates are confirmed by default here.
         data = {"owner_id": owner.pk, "date_paid": paid, "vendor": "Sample Supply", "description": "Printer paper", "amount": amount, "business_purpose": "Client proposal printing", **extra}
         with mock.patch("django.utils.timezone.now", return_value=logged):
-            return founder.create_expense(user=self.user, data=data, receipts=receipts)
+            return founder.create_expense(user=self.user, data=data, receipts=receipts, confirm_duplicate=confirm_duplicate)
 
     def flags(self, expense):
         return founder.flags(FounderExpense.objects.get(pk=expense.pk))
@@ -292,14 +293,24 @@ class CsvImportTests(FounderTestCase):
         self.assertIn("UTF-8", founder.import_csv(user=self.user, upload=SimpleUploadedFile("x.csv", "é".encode("latin-1"), content_type="text/csv"))["file_errors"][0])
 
 
+FOUNDER_READ_TOOLS = {"list_founder_expenses", "founder_expense_summary", "get_founder_expense_settings", "get_founder_expense_receipt"}
+FOUNDER_WRITE_TOOLS = {"log_founder_expense", "update_founder_expense", "withdraw_founder_expense", "attach_founder_expense_receipt"}
+
+
 class McpTests(FounderTestCase):
-    def test_tools_are_read_only_and_there_are_no_founder_write_tools(self):
+    def test_read_tools_for_viewers_write_tools_for_bookkeepers_and_no_settings_writes(self):
         tools = {item["name"]: item for item in self.rpc("tools/list").json()["result"]["tools"]}
-        for name in ("list_founder_expenses", "founder_expense_summary"):
-            self.assertTrue(tools[name]["annotations"]["readOnlyHint"])
-        self.assertEqual({name for name in tools if "founder" in name}, {"list_founder_expenses", "founder_expense_summary"})
+        self.assertEqual({name for name in tools if "founder" in name}, FOUNDER_READ_TOOLS | FOUNDER_WRITE_TOOLS)
+        for name in FOUNDER_READ_TOOLS:
+            self.assertTrue(tools[name]["annotations"]["readOnlyHint"], name)
+        for name in FOUNDER_WRITE_TOOLS:
+            self.assertFalse(tools[name]["annotations"]["readOnlyHint"], name)
+        self.assertTrue(tools["withdraw_founder_expense"]["annotations"]["destructiveHint"])
         _, viewer = ApiToken.issue(user=make_user("reader", UserProfile.Role.VIEWER), name="read")
-        self.assertLessEqual({"list_founder_expenses", "founder_expense_summary"}, self.tool_names(viewer))
+        self.assertLessEqual(FOUNDER_READ_TOOLS, self.tool_names(viewer))
+        self.assertFalse(FOUNDER_WRITE_TOOLS & self.tool_names(viewer))
+        _, owner = ApiToken.issue(user=make_user("principal", UserProfile.Role.OWNER), name="owner")
+        self.assertFalse({name for name in self.tool_names(owner) if "founder" in name and "setting" in name} - {"get_founder_expense_settings"})
 
     def test_list_fields_and_filters(self):
         self.log(self.alice, "2026-08-10", at(2026, 8, 20, 18), category="6100")
@@ -322,8 +333,8 @@ class McpTests(FounderTestCase):
             {"category": "6100", "category_name": "Software", "total": "50.00", "count": 2},
             {"category": None, "category_name": "Uncategorized", "total": "5.00", "count": 1},
         ])
-        self.assertEqual((row["total"], row["count"], row["late_count"], row["missing_receipts_count"]), ("55.00", 3, 0, 3))
-        self.assertNotIn("missing_receipts", row)
+        self.assertEqual((row["total"], row["business_total"], row["count"], row["late_count"], row["flagged_count"], row["missing_receipts_count"]), ("55.00", "55.00", 3, 0, 0, 3))
+        self.assertEqual(len(row["missing_receipts"]), 3)
         self.assertEqual(self.call("founder_expense_summary", year=2025)["structuredContent"]["owners"], [])
         self.assertTrue(self.call("founder_expense_summary", year="twenty")["isError"])
 

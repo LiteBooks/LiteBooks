@@ -9,7 +9,7 @@ from uuid import uuid4
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 
 
@@ -672,7 +672,11 @@ class FounderExpense(TimeStampedModel):
     date_paid = models.DateField()
     vendor = models.CharField(max_length=160)
     description = models.CharField(max_length=240)
+    # The full charge. business_amount is the part that was for the business; null on rows
+    # saved before it existed is read as the full amount.
     amount = models.DecimalField(max_digits=12, decimal_places=2)
+    business_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    allocation_note = models.TextField(blank=True)
     business_purpose = models.TextField()
     property_stays_personal = models.BooleanField(default=False)
     # An expense account code, used as a label only. Not a foreign key: these never touch an account.
@@ -690,7 +694,13 @@ class FounderExpense(TimeStampedModel):
     class Meta:
         db_table = "founder_expenses"
         ordering = ["-date_paid", "-pk"]
-        constraints = [models.CheckConstraint(condition=Q(amount__gt=0), name="founder_expense_amount_positive")]
+        constraints = [
+            models.CheckConstraint(condition=Q(amount__gt=0), name="founder_expense_amount_positive"),
+            models.CheckConstraint(
+                condition=Q(business_amount__isnull=True) | (Q(business_amount__gt=0) & Q(business_amount__lte=F("amount"))),
+                name="founder_expense_business_within_amount",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.owner_contact} {self.date_paid} {self.vendor} {self.amount}"
@@ -702,6 +712,7 @@ class FounderExpenseReceipt(models.Model):
     original_name = models.CharField(max_length=255)
     content_type = models.CharField(max_length=120, blank=True)
     size = models.PositiveBigIntegerField(default=0)
+    sha256 = models.CharField(max_length=64, blank=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
     uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL, related_name="+")
 
@@ -713,11 +724,13 @@ class FounderExpenseReceipt(models.Model):
 
 
 class FounderExpenseSettings(models.Model):
-    """The special logging window: payments in [start, end] must be logged by deadline."""
+    """The special logging window (payments in [start, end] must be logged by deadline) and the standard deadline."""
 
     special_window_start = models.DateField(null=True, blank=True)
     special_window_end = models.DateField(null=True, blank=True)
     special_window_deadline = models.DateField(null=True, blank=True)
+    # Payments outside the special window must be logged within this many days.
+    standard_deadline_days = models.PositiveSmallIntegerField(default=30)
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
 

@@ -15,13 +15,17 @@ before anything is posted.
 
 import json
 import re
+from base64 import b64decode, b64encode
+from binascii import Error as Base64Error
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
+from pathlib import PurePath
 
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import transaction
 from django.db.models import DecimalField, Q, Sum, Value
 from django.db.models.functions import Coalesce
@@ -38,6 +42,9 @@ from .models import (
     AuditEvent,
     BusinessDocument,
     Contact,
+    FounderExpense,
+    FounderExpenseReceipt,
+    FounderExpenseSettings,
     JournalEntry,
     JournalLine,
     OwnerActivity,
@@ -90,7 +97,7 @@ Money moving between an owner and the business (equity contributions, draws, loa
 
 For partnership tax work, ownership percentages over time come from list_owner_interests and ownership_as_of. partner_allocation_report splits income among owners when ownership changes mid-year, and capital_account_rollforward builds each owner's capital account. Ownership is entered in the web app only, and allocations are reports: they are never posted to the ledger.
 
-Founder-borne expenses (list_founder_expenses, founder_expense_summary) are business expenses an owner paid personally and agreed not to be reimbursed for. They are NOT company expenses: never add them to company totals, financial statements, or the company's tax return. They support each owner's personal return (unreimbursed partnership expenses). They are entered in the web app only.
+Founder-borne expenses are business expenses an owner paid personally and agreed not to be reimbursed for. They are NOT company expenses: never add them to company totals, financial statements, or the company's tax return, and never book them with create_journal_entry or import_transactions. They support each owner's personal return (unreimbursed partnership expenses), and a timely entry is the owner's evidence, so log them promptly. Use log_founder_expense with dry_run=true first, show the user the preview (deadline, timely or late, warnings), and log with dry_run=false only after they approve; for possible_duplicate, ask before passing confirm_duplicate=true. update_founder_expense, withdraw_founder_expense (confirm first; it cannot be undone), and attach_founder_expense_receipt change entries; list_founder_expenses, founder_expense_summary, get_founder_expense_settings, and get_founder_expense_receipt read them. The logging window settings are changed in the web app only.
 
 Before relying on totals, call account_sync_status to see when each bank and card account was last synced and how its book balance compares with the latest statement, and say how current the books are. server_info reports which LiteBooks build you are connected to and which tools it offers.
 
@@ -1284,6 +1291,8 @@ AUDIT_RECORD_TYPES = {
     "period": AccountingPeriod,
     "user": UserProfile,
     "api_token": ApiToken,
+    "founder_expense": FounderExpense,
+    "founder_expense_settings": FounderExpenseSettings,
 }
 AUDIT_LABELS = {model._meta.label: name for name, model in AUDIT_RECORD_TYPES.items()}
 
@@ -1294,7 +1303,7 @@ AUDIT_LABELS = {model._meta.label: name for name, model in AUDIT_RECORD_TYPES.it
     {
         "record_type": {"type": "string", "enum": list(AUDIT_RECORD_TYPES)},
         "record_id": {"type": "integer", "description": "With record_type, the history of one record."},
-        "action": {"type": "string", "description": "e.g. created, updated, deleted, restored, closed, reopened."},
+        "action": {"type": "string", "description": "e.g. created, updated, deleted, restored, closed, reopened, withdrew (founder expenses; receipt uploads and removals are founder_expense updates)."},
         "username": {"type": "string"},
         "start": {"type": "string", "description": "YYYY-MM-DD"},
         "end": {"type": "string", "description": "YYYY-MM-DD"},
@@ -1628,14 +1637,42 @@ def account_sync_status(user, args):
 
 # -- Founder-borne expenses -------------------------------------------------------
 #
-# Read only, and outside the books: these are owners' own unreimbursed expenses,
-# never company expenses. Entries are made in the web app or by its CSV import.
+# Outside the books: these are owners' own unreimbursed expenses, never company
+# expenses. Every tool here calls the same ledger.founder functions the web app's
+# Founder Expense Log page uses (validation, deadlines, duplicates, withdraw,
+# audit), and touches only the founder expense tables and the audit log.
 
 MCP_EXPENSE_FIELDS = (
-    "id", "owner_id", "owner_name", "date_paid", "vendor", "description", "amount", "category", "business_purpose",
-    "property_stays_personal", "has_receipt", "logged_at", "days_to_log", "late", "in_special_window", "special_window_late",
-    "approval_reminder", "status", "withdrawn_reason",
+    "id", "owner_id", "owner_name", "date_paid", "vendor", "description", "amount", "business_amount", "allocation_note", "category",
+    "business_purpose", "property_stays_personal", "has_receipt", "receipt_url", "receipt_count", "receipts", "logged_at", "days_to_log",
+    "deadline", "deadline_rule", "timely", "late", "in_special_window", "special_window_late", "approval_reminder", "approval_note",
+    "source", "status", "withdrawn_reason", "withdrawn_at",
 )
+FOUNDER_EXPENSE_INPUTS = {
+    "owner_id": {"type": "integer", "description": "The owner who paid: a contact with kind=owner (list_contacts)."},
+    "date_paid": {"type": "string", "description": "YYYY-MM-DD. Not in the future."},
+    "vendor": {"type": "string", "maxLength": 160},
+    "description": {"type": "string", "maxLength": 240},
+    "amount": {"type": ["string", "number"], "description": "The full charge, e.g. \"40.00\"."},
+    "business_amount": {"type": ["string", "number"], "description": "The business part of the charge, at most the full amount. Defaults to the full amount."},
+    "allocation_note": {"type": "string", "description": "How the business amount was worked out. Required when business_amount is less than amount."},
+    "business_purpose": {"type": "string"},
+    "property_stays_personal": {"type": "boolean", "description": "Whether anything bought remains the owner's personal property."},
+    "category": {"type": "string", "description": "Optional expense account code, used as a label only (nothing is posted)."},
+    "receipt_url": {"type": "string", "description": "Optional http(s) link to a receipt kept elsewhere."},
+}
+RECEIPT_INPUT = {
+    "type": "object",
+    "properties": {
+        "filename": {"type": "string"},
+        "mime_type": {"type": "string", "enum": sorted(founder.RECEIPT_TYPES)},
+        "content_base64": {"type": "string", "description": "The file, base64 encoded. 10 MB or smaller once decoded."},
+    },
+    "required": ["filename", "mime_type", "content_base64"],
+    "additionalProperties": False,
+}
+SERVER_SET = ("logged_at", "source", "status", "withdrawn_at", "withdrawn_reason", "created_by", "updated_by")
+RECEIPT_MAX_BASE64 = (founder.RECEIPT_MAX_BYTES + 2) // 3 * 4
 
 
 def owner_filter(args):
@@ -1647,41 +1684,261 @@ def owner_filter(args):
     return owner.pk
 
 
+def founder_expense_data(args):
+    return {key: args[key] for key in FOUNDER_EXPENSE_INPUTS if key in args}
+
+
+def founder_expense_out(expense):
+    fresh = FounderExpense.objects.select_related("owner_contact").prefetch_related("receipts").get(pk=expense.pk)
+    row = founder.expense_json(fresh)
+    return {key: row[key] for key in MCP_EXPENSE_FIELDS}
+
+
+def get_founder_expense(args):
+    pk = required(args, "id")
+    try:
+        return FounderExpense.objects.select_related("owner_contact").prefetch_related("receipts").get(pk=int(pk))
+    except (FounderExpense.DoesNotExist, ValueError, TypeError) as exc:
+        raise ToolError(f"id {pk!r} is not a founder expense. Call list_founder_expenses for valid ids.") from exc
+
+
+def decode_receipt(item, label="receipt"):
+    """One {filename, mime_type, content_base64} as an upload. The type, size, and content checks are founder.validate_receipt's."""
+    if not isinstance(item, dict):
+        raise ToolError(f"{label} must be an object with filename, mime_type, and content_base64.")
+    filename = PurePath(str(item.get("filename") or "").replace("\\", "/")).name.strip()
+    if not filename:
+        raise ToolError(f"{label}.filename is required.")
+    text = "".join(str(item.get("content_base64") or "").split())
+    if text.startswith("data:") and "," in text:
+        text = text.split(",", 1)[1]
+    if not text:
+        raise ToolError(f"{label}.content_base64 is required.")
+    if len(text) > RECEIPT_MAX_BASE64:
+        raise ToolError(f"{label} ({filename}): receipts must be 10 MB or smaller.")
+    try:
+        content = b64decode(text, validate=True)
+    except (Base64Error, ValueError) as exc:
+        raise ToolError(f"{label} ({filename}): content_base64 is not valid base64.") from exc
+    return SimpleUploadedFile(filename[:255], content, content_type=str(item.get("mime_type") or "").strip().lower())
+
+
+def field_errors(message_dict):
+    return [{"field": field, "message": message} for field, messages in message_dict.items() for message in messages]
+
+
+def founder_warnings(status, values, has_receipt):
+    warnings = []
+    if status["late"]:
+        warnings.append(f"Logged today, this is past its logging deadline of {status['deadline']}: it will be saved but flagged late.")
+    if status["approval_reminder"]:
+        warnings.append(founder.APPROVAL_NOTE)
+    if not has_receipt:
+        warnings.append("No receipt is attached. Attach one with attach_founder_expense_receipt when you have it.")
+    if values["business_amount"] < values["amount"]:
+        warnings.append(f"Only {founder.money(values['business_amount'])} of the {founder.money(values['amount'])} charge is business.")
+    return warnings
+
+
+@tool(
+    "log_founder_expense",
+    "Log a founder-borne expense: a business expense an owner paid personally and will not be reimbursed for. It is kept OUTSIDE the company's books (no journal entry, never in company reports or the company's tax return); a timely entry is the owner's evidence for deducting it personally. "
+    "Same rules as the web app's 'Log expense'. dry_run defaults to true and saves nothing: show the user the preview (deadline, timely or late, warnings) and log it with dry_run=false only after they approve. "
+    "status is ready (dry run passed), created, possible_duplicate (an active entry has the same owner, vendor, date paid, and full amount; nothing saved unless confirm_duplicate=true), or invalid (see errors). "
+    "The deadline is the special window's log-by date for payments inside it, otherwise date paid + the standard deadline days (get_founder_expense_settings). Late entries are saved and flagged, not rejected. logged_at is set by the server.",
+    {
+        **FOUNDER_EXPENSE_INPUTS,
+        "receipts": {"type": "array", "items": RECEIPT_INPUT, "description": "PDF, PNG, JPEG, or WebP files, each 10 MB or smaller."},
+        "dry_run": {"type": "boolean", "default": True},
+        "confirm_duplicate": {"type": "boolean", "default": False, "description": "Save even though it looks like a duplicate. Only after the user confirms it is a separate expense."},
+    },
+    required=("owner_id", "date_paid", "vendor", "description", "amount", "business_purpose"),
+    minimum_role=UserProfile.Role.BOOKKEEPER,
+    read_only=False,
+)
+def log_founder_expense(user, args):
+    dry_run = args.get("dry_run", True) is not False
+    confirm = args.get("confirm_duplicate") is True
+    data = founder_expense_data(args)
+    receipts = args.get("receipts") or []
+    if not isinstance(receipts, list):
+        raise ToolError("receipts must be an array of {filename, mime_type, content_base64}.")
+    uploads, errors = [], []
+    for index, item in enumerate(receipts):
+        try:
+            uploads.append(decode_receipt(item, f"receipts[{index}]"))
+        except ToolError as error:
+            errors.append({"field": f"receipts[{index}]", "message": str(error)})
+    check = founder.check_new_expense(data, uploads)
+    errors = field_errors(check["errors"]) + errors
+    if errors:
+        return {"status": "invalid", "dry_run": dry_run, "errors": errors, "warnings": []}
+
+    values, status = check["values"], check["status"]
+    warnings = founder_warnings(status, values, bool(uploads) or bool(values["receipt_url"]))
+    preview = {
+        "owner_id": values["owner_contact"].pk, "owner_name": values["owner_contact"].name, "date_paid": values["date_paid"].isoformat(),
+        "vendor": values["vendor"], "description": values["description"], "amount": founder.money(values["amount"]),
+        "business_amount": founder.money(values["business_amount"]), "allocation_note": values["allocation_note"],
+        "business_purpose": values["business_purpose"], "property_stays_personal": values["property_stays_personal"],
+        "category": values["category"] or None, "receipt_url": values["receipt_url"],
+        "receipts": [{"name": item.name, "content_type": item.content_type, "size": item.size, "sha256": founder.file_sha256(item)} for item in uploads],
+        "logged_on_if_saved_today": timezone.localdate().isoformat(), **status,
+    }
+    if check["duplicates"] and not confirm:
+        return {"status": "possible_duplicate", "dry_run": dry_run, "duplicate_of": check["duplicates"], "preview": preview,
+                "warnings": [founder.duplicate_message(check["duplicates"]), *warnings], "errors": []}
+    if check["duplicates"]:
+        warnings.insert(0, f"Logged despite a possible duplicate of entry {', '.join(f'#{pk}' for pk in check['duplicates'])} (confirm_duplicate=true).")
+    if dry_run:
+        return {"status": "ready", "dry_run": True, "preview": preview, "warnings": warnings, "errors": [],
+                "outcome": "Nothing was saved. Call again with dry_run=false to log it."}
+    expense = founder.create_expense(user=user, data=data, receipts=uploads, confirm_duplicate=confirm)
+    entry = founder_expense_out(expense)
+    return {"status": "created", "dry_run": False, "entry": entry, "deadline": entry["deadline"], "timely": entry["timely"], "warnings": warnings, "errors": []}
+
+
+@tool(
+    "update_founder_expense",
+    "Change a logged founder-borne expense, with the same rules as editing it in the web app. Pass id and only the fields to change. The deadline and timely/late flag are recomputed from the date paid; logged_at never changes. Withdrawn entries cannot be changed.",
+    {"id": {"type": "integer"}, **FOUNDER_EXPENSE_INPUTS},
+    required=("id",),
+    minimum_role=UserProfile.Role.BOOKKEEPER,
+    read_only=False,
+)
+def update_founder_expense(user, args):
+    for key in SERVER_SET:
+        if key in args:
+            raise ToolError(f"{key} is set by LiteBooks and cannot be changed." + (" Use withdraw_founder_expense to withdraw an entry." if key in {"status", "withdrawn_reason", "withdrawn_at"} else ""))
+    unknown = sorted(set(args) - set(FOUNDER_EXPENSE_INPUTS) - {"id"})
+    if unknown:
+        raise ToolError(f"Unknown field(s): {', '.join(unknown)}. Editable: {', '.join(FOUNDER_EXPENSE_INPUTS)}.")
+    data = founder_expense_data(args)
+    if not data:
+        raise ToolError("Pass at least one field to change.")
+    expense = get_founder_expense(args)
+    before = founder.flags(expense)
+    founder.update_expense(user=user, expense=expense, data=data)
+    entry = founder_expense_out(expense)
+    return {"status": "updated", "entry": entry, "deadline_changed": before["deadline"] != entry["deadline"], "late_changed": before["late"] != entry["late"]}
+
+
+@tool(
+    "withdraw_founder_expense",
+    "Withdraw a founder-borne expense, exactly like the web app's Withdraw: it stays in the log with the reason, stops counting toward totals, and can no longer be changed. Nothing is deleted. This cannot be undone, so confirm with the user first.",
+    {"id": {"type": "integer"}, "reason": {"type": "string"}},
+    required=("id", "reason"),
+    minimum_role=UserProfile.Role.BOOKKEEPER,
+    read_only=False,
+    destructive=True,
+)
+def withdraw_founder_expense(user, args):
+    expense = get_founder_expense(args)
+    founder.withdraw_expense(user=user, expense=expense, reason=args.get("reason"))
+    return {"status": "withdrawn", "entry": founder_expense_out(expense)}
+
+
+@tool(
+    "attach_founder_expense_receipt",
+    "Attach a receipt file to a logged founder-borne expense. PDF, PNG, JPEG, or WebP, 10 MB or smaller, base64 encoded; the contents must match mime_type. The file is stored privately with its sha256 hash.",
+    {"id": {"type": "integer"}, **RECEIPT_INPUT["properties"]},
+    required=("id", "filename", "mime_type", "content_base64"),
+    minimum_role=UserProfile.Role.BOOKKEEPER,
+    read_only=False,
+)
+def attach_founder_expense_receipt(user, args):
+    expense = get_founder_expense(args)
+    upload = decode_receipt({key: args.get(key) for key in ("filename", "mime_type", "content_base64")})
+    existing = set(expense.receipts.values_list("pk", flat=True))
+    founder.upload_receipts(user=user, expense=expense, receipts=[upload])
+    entry = founder_expense_out(expense)
+    added = [item for item in entry["receipts"] if item["id"] not in existing]
+    return {"status": "attached", "receipt": added[0] if added else None, "entry": entry}
+
+
 @tool(
     "list_founder_expenses",
-    "Founder-borne expenses: business expenses an owner paid personally and agreed to bear without reimbursement. NOT company expenses and never in the company's books, reports, or tax return; they support the owner's personal return. Filter by owner and by date paid (both ends inclusive). Flags are informational: late (logged more than 30 days after payment), special_window_late (paid in the special logging window and logged after its deadline), approval_reminder ($250 or more; may need approval if it creates a company obligation). Withdrawn entries are left out unless include_withdrawn is true.",
+    "Founder-borne expenses: business expenses an owner paid personally and agreed to bear without reimbursement. NOT company expenses and never in the company's books, reports, or tax return; they support the owner's personal return. "
+    "Filter by owner, year paid, or date paid range (both ends inclusive), and by flagged (true: only entries logged after their deadline; false: only timely ones). amount is the full charge and business_amount the business part. "
+    "Each entry has its logging deadline (the special window's log-by date for payments inside the window, otherwise date paid + the standard deadline days) and timely/late. approval_reminder marks $250 or more. Withdrawn entries are left out unless include_withdrawn is true, like the web app's Show withdrawn toggle.",
     {
         "owner_id": {"type": "integer"},
+        "year_paid": {"type": "integer"},
         "start": {"type": "string", "description": "YYYY-MM-DD, earliest date paid."},
         "end": {"type": "string", "description": "YYYY-MM-DD, latest date paid."},
         "include_withdrawn": {"type": "boolean", "default": False},
+        "flagged": {"type": "boolean"},
     },
 )
 def list_founder_expenses(user, args):
     start, end = optional_date(args, "start"), optional_date(args, "end")
     if start and end and start > end:
         raise ToolError("start must be on or before end.")
+    year = founder_year(args, "year_paid") if args.get("year_paid") is not None else None
+    flagged = args.get("flagged")
+    if flagged is not None and not isinstance(flagged, bool):
+        raise ToolError("flagged must be true or false.")
     window = founder.FounderExpenseSettings.load()
     names = founder.category_names()
-    rows = founder.expenses(owner_id=owner_filter(args), start=start, end=end, include_withdrawn=bool(args.get("include_withdrawn")))
+    rows = founder.expenses(owner_id=owner_filter(args), year=year, start=start, end=end, include_withdrawn=args.get("include_withdrawn") is True, flagged=flagged, window=window)
     return {"founder_expenses": [{key: row[key] for key in MCP_EXPENSE_FIELDS} for row in (founder.expense_json(item, window, names) for item in rows)]}
+
+
+def founder_year(args, key):
+    try:
+        year = int(args[key])
+    except (TypeError, ValueError) as exc:
+        raise ToolError(f"{key} must be a whole number such as 2026.") from exc
+    if not 1900 <= year <= 9999:
+        raise ToolError(f"{key} must be a four-digit year.")
+    return year
 
 
 @tool(
     "founder_expense_summary",
-    "Per owner, a year's founder-borne expenses (by date paid, withdrawn entries excluded): total, count, totals by category, how many were logged late, and how many have no receipt. For the owner's personal return; never include these in company totals.",
-    {"year": {"type": "integer"}, "owner_id": {"type": "integer"}},
-    required=("year",),
+    "Per owner, a year's founder-borne expenses by date paid, withdrawn entries excluded: the same numbers as the web app's yearly summary. count, total (full charges), business_total, totals by category, flagged_count (logged after their deadline; late_count is the same number), and the entries missing a receipt. For the owner's personal return; never include these in company totals.",
+    {"year_paid": {"type": "integer"}, "year": {"type": "integer", "description": "Older name for year_paid."}, "owner_id": {"type": "integer"}},
 )
 def founder_expense_summary(user, args):
+    key = "year_paid" if args.get("year_paid") is not None else "year"
+    if args.get(key) is None:
+        raise ToolError("year_paid is required.")
+    year = founder_year(args, key)
+    return {"year": year, "owners": founder.summary(year, owner_id=owner_filter(args))}
+
+
+@tool(
+    "get_founder_expense_settings",
+    "The founder expense logging rules: the special window (payments from special_window_start to special_window_end must be logged by special_window_deadline; all null when there is no window) and standard_deadline_days for every other payment. Read only: these are changed in the web app by an administrator.",
+    {},
+)
+def get_founder_expense_settings(user, args):
+    return {"settings": founder.settings_json()}
+
+
+@tool(
+    "get_founder_expense_receipt",
+    "One founder expense receipt: its metadata (name, type, size, sha256, entry) and the file itself as base64. sha256_verified says whether the stored file still matches the hash recorded when it was uploaded.",
+    {"receipt_id": {"type": "integer"}},
+    required=("receipt_id",),
+)
+def get_founder_expense_receipt(user, args):
+    pk = required(args, "receipt_id")
     try:
-        year = int(required(args, "year"))
-    except (TypeError, ValueError) as exc:
-        raise ToolError("year must be a whole number such as 2026.") from exc
-    if not 1900 <= year <= 9999:
-        raise ToolError("year must be a four-digit year.")
-    rows = founder.summary(year, owner_id=owner_filter(args))
-    return {"year": year, "owners": [{key: value for key, value in row.items() if key != "missing_receipts"} for row in rows]}
+        receipt = FounderExpenseReceipt.objects.select_related("expense").get(pk=int(pk))
+    except (FounderExpenseReceipt.DoesNotExist, ValueError, TypeError) as exc:
+        raise ToolError(f"receipt_id {pk!r} is not a founder expense receipt. list_founder_expenses shows each entry's receipts.") from exc
+    try:
+        with receipt.file.open("rb") as handle:
+            content = handle.read()
+    except (FileNotFoundError, OSError) as exc:
+        raise ToolError("The receipt file is missing from storage.") from exc
+    digest = sha256(content).hexdigest()
+    return {
+        "receipt": {**founder.receipt_json(receipt), "expense_id": receipt.expense_id, "expense_status": receipt.expense.status},
+        "sha256_verified": bool(receipt.sha256) and digest == receipt.sha256,
+        "content_base64": b64encode(content).decode("ascii"),
+    }
 
 
 # -- Transport ----------------------------------------------------------------

@@ -1002,7 +1002,9 @@ def founder_expenses_api(request):
     if request.method == "POST":
         if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.BOOKKEEPER]:
             return JsonResponse({"error": "You do not have permission to perform this action."}, status=403)
-        expense = founder.create_expense(user=request.user, data=request_data(request), receipts=request.FILES.getlist("receipts"))
+        data = request_data(request)
+        confirm = str(data.get("confirm_duplicate") or "").strip().lower() in {"1", "true", "yes"}
+        expense = founder.create_expense(user=request.user, data=data, receipts=request.FILES.getlist("receipts"), confirm_duplicate=confirm)
         return JsonResponse({"entry": founder.expense_json(expense)}, status=201)
     filters = founder_filters(request)
     window = FounderExpenseSettings.load()
@@ -1077,7 +1079,7 @@ def founder_expense_export_api(request):
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["Not company expenses. Not included in company books or tax returns."])
-    writer.writerow(["Id", "Owner", "Owner email", "Date paid", "Vendor", "Description", "Amount", "Category", "Category name", "Business purpose", "Property stays personal", "Has receipt", "Receipt link", "Receipt files", "Logged at", "Days to log", "Late", "In special window", "Special window late", "Approval reminder", "Source", "Status", "Withdrawn reason"])
+    writer.writerow(["Id", "Owner", "Owner email", "Date paid", "Vendor", "Description", "Amount", "Category", "Category name", "Business purpose", "Property stays personal", "Has receipt", "Receipt link", "Receipt files", "Logged at", "Days to log", "Late", "In special window", "Special window late", "Approval reminder", "Source", "Status", "Withdrawn reason", "Business amount", "Allocation note", "Deadline", "Timely"])
     for expense in founder.expenses(**filters):
         row = founder.expense_json(expense, window, names)
         writer.writerow([
@@ -1086,6 +1088,7 @@ def founder_expense_export_api(request):
             "Y" if row["has_receipt"] else "N", row["receipt_url"], "; ".join(item["name"] for item in row["receipts"]),
             row["logged_at"], row["days_to_log"], "Y" if row["late"] else "N", "Y" if row["in_special_window"] else "N",
             "Y" if row["special_window_late"] else "N", "Y" if row["approval_reminder"] else "N", row["source"], row["status"], row["withdrawn_reason"],
+            row["business_amount"], row["allocation_note"], row["deadline"], "Y" if row["timely"] else "N",
         ])
     suffix = f"-{filters['year']}" if filters["year"] else ""
     response = HttpResponse(output.getvalue(), content_type="text/csv")
@@ -1113,5 +1116,6 @@ def founder_expense_settings_api(request):
             start=optional_date_value(data.get("special_window_start"), "special_window_start"),
             end=optional_date_value(data.get("special_window_end"), "special_window_end"),
             deadline=optional_date_value(data.get("special_window_deadline"), "special_window_deadline"),
+            standard_deadline_days=data.get("standard_deadline_days") if data.get("standard_deadline_days") not in (None, "") else None,
         )
     return JsonResponse({"settings": founder.settings_json()})

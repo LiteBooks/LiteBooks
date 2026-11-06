@@ -15,7 +15,12 @@ import { DataTable, DateField, ErrorState, fieldError, formatDate, formatMoney, 
 import { useApp } from "../context";
 
 const BANNER = "Not company expenses. Not included in company books or tax returns.";
-const blank = { owner_id: "", date_paid: "", vendor: "", description: "", amount: "", business_purpose: "", property_stays_personal: false, category: "", receipt_url: "" };
+const blank = { owner_id: "", date_paid: "", vendor: "", description: "", amount: "", business_amount: "", allocation_note: "", business_purpose: "", property_stays_personal: false, category: "", receipt_url: "" };
+
+function isPartial(full, business) {
+  const total = Number(full); const part = Number(business);
+  return business !== "" && business !== null && business !== undefined && Number.isFinite(total) && Number.isFinite(part) && part < total;
+}
 
 function queryString(params) {
   const search = new URLSearchParams();
@@ -27,8 +32,9 @@ function queryString(params) {
 function Flags({ row }) {
   return (
     <Stack sx={{ flexWrap: "wrap" }} direction="row" spacing={0.5} useFlexGap>
-      {row.late && <Tooltip title={`Logged ${row.days_to_log} days after payment (more than 30).`}><Chip size="small" color="warning" variant="outlined" label="Late" /></Tooltip>}
-      {row.special_window_late && <Tooltip title="Paid in the special logging window and logged after its deadline."><Chip size="small" color="warning" label="Past window deadline" /></Tooltip>}
+      {row.special_window_late
+        ? <Tooltip title={`Paid in the special logging window and logged after its ${formatDate(row.deadline)} deadline.`}><Chip size="small" color="warning" label="Past window deadline" /></Tooltip>
+        : row.late && <Tooltip title={`Logged ${row.days_to_log} days after payment, after the ${formatDate(row.deadline)} deadline.`}><Chip size="small" color="warning" variant="outlined" label="Late" /></Tooltip>}
       {row.approval_reminder && <Tooltip title={row.approval_note}><Chip size="small" color="info" variant="outlined" label="$250+ review" /></Tooltip>}
       {!row.has_receipt && <Chip size="small" variant="outlined" label="No receipt" />}
     </Stack>
@@ -38,23 +44,27 @@ function Flags({ row }) {
 function EntryDialog({ entry, owners, categories, onClose, onSaved }) {
   const { notify } = useApp();
   const editing = entry !== "new";
-  const [values, setValues] = useState(editing ? { ...blank, ...entry, category: entry.category || "", owner_id: entry.owner_id } : blank);
+  const [values, setValues] = useState(editing ? { ...blank, ...entry, category: entry.category || "", owner_id: entry.owner_id, business_amount: entry.business_amount === entry.amount ? "" : entry.business_amount } : blank);
   const [files, setFiles] = useState([]);
   const [receipts, setReceipts] = useState(editing ? entry.receipts : []);
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
   const set = (key) => (event) => setValues({ ...values, [key]: event.target.value });
-  const save = async (event) => {
-    event.preventDefault(); setSaving(true); setErrors({});
+  const partial = isPartial(values.amount, values.business_amount);
+  const submit = async (confirmDuplicate) => {
+    setSaving(true); setErrors({});
     const body = new FormData();
-    ["owner_id", "date_paid", "vendor", "description", "amount", "business_purpose", "category", "receipt_url"].forEach((key) => body.append(key, values[key] ?? ""));
+    ["owner_id", "date_paid", "vendor", "description", "amount", "business_amount", "allocation_note", "business_purpose", "category", "receipt_url"].forEach((key) => body.append(key, values[key] ?? ""));
     body.append("property_stays_personal", values.property_stays_personal ? "true" : "false");
+    if (confirmDuplicate) body.append("confirm_duplicate", "true");
     files.forEach((file) => body.append("receipts", file));
     try {
       await api(editing ? `/api/founder-expenses/${entry.id}/` : "/api/founder-expenses/", { method: "POST", body });
       notify(editing ? "Entry updated." : "Entry logged."); onSaved();
-    } catch (failure) { setErrors({ ...(failure.fields || {}), __all__: failure.message }); } finally { setSaving(false); }
+    } catch (failure) { setErrors({ ...(failure.fields || {}), __all__: failure.fields?.confirm_duplicate ? "" : failure.message }); } finally { setSaving(false); }
   };
+  const save = (event) => { event.preventDefault(); submit(false); };
+  const duplicate = fieldError(errors, "confirm_duplicate");
   const removeReceipt = async (receipt) => {
     try { const response = await api(`/api/founder-expenses/receipts/${receipt.id}/`, { method: "DELETE" }); setReceipts(response.entry.receipts); notify("Receipt removed."); }
     catch (failure) { notify(failure.message, "error"); }
@@ -66,11 +76,14 @@ function EntryDialog({ entry, owners, categories, onClose, onSaved }) {
       <DialogContent>
         <Alert severity="info" sx={{ mb: 2 }}>{BANNER} Logging it here does not post anything to the ledger.</Alert>
         {errors.__all__ && <Alert severity="error" sx={{ mb: 2 }}>{errors.__all__}</Alert>}
+        {duplicate && <Alert severity="warning" sx={{ mb: 2 }} action={<Button color="inherit" size="small" disabled={saving} onClick={() => submit(true)}>Log anyway</Button>}>{duplicate}</Alert>}
         <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "repeat(2, 1fr)" }, gap: 2, pt: 0.5 }}>
           <TextField select required size="small" label="Owner who paid" value={values.owner_id} onChange={set("owner_id")} {...field("owner_id")}>{owners.map((owner) => <MenuItem key={owner.id} value={owner.id}>{owner.name}</MenuItem>)}</TextField>
           <DateField required label="Date paid" value={values.date_paid} onChange={(value) => setValues({ ...values, date_paid: value })} disableFuture {...field("date_paid")} />
           <TextField required size="small" label="Vendor" value={values.vendor} onChange={set("vendor")} {...field("vendor")} />
-          <TextField required size="small" label="Amount" slotProps={{ htmlInput: { inputMode: "decimal" } }} value={values.amount} onChange={set("amount")} {...field("amount")} />
+          <TextField required size="small" label="Full charge" slotProps={{ htmlInput: { inputMode: "decimal" } }} value={values.amount} onChange={set("amount")} {...field("amount")} />
+          <TextField size="small" label="Business amount" placeholder={values.amount || "Same as full charge"} slotProps={{ htmlInput: { inputMode: "decimal" } }} value={values.business_amount} onChange={set("business_amount")} error={Boolean(fieldError(errors, "business_amount"))} helperText={fieldError(errors, "business_amount") || "Leave empty if all of it was for the business."} />
+          <TextField required={partial} size="small" label="Allocation note" placeholder="e.g. 50% business use" value={values.allocation_note} onChange={set("allocation_note")} error={Boolean(fieldError(errors, "allocation_note"))} helperText={fieldError(errors, "allocation_note") || (partial ? "Required: how the business amount was worked out." : "Needed when the business amount is less than the full charge.")} />
           <TextField required size="small" label="Description" value={values.description} onChange={set("description")} sx={{ gridColumn: { sm: "1 / -1" } }} {...field("description")} />
           <TextField required multiline minRows={2} size="small" label="Business purpose" value={values.business_purpose} onChange={set("business_purpose")} sx={{ gridColumn: { sm: "1 / -1" } }} {...field("business_purpose")} />
           <TextField select size="small" label="Category (label only)" value={values.category} onChange={set("category")} {...field("category")}><MenuItem value="">Uncategorized</MenuItem>{categories.map((account) => <MenuItem key={account.code} value={account.code}>{account.code} · {account.name}</MenuItem>)}</TextField>
@@ -131,7 +144,7 @@ function ImportDialog({ onClose, onSaved }) {
     <Dialog open onClose={onClose} fullWidth maxWidth="lg">
       <DialogTitle>Import founder expenses from CSV</DialogTitle>
       <DialogContent>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Columns: owner email, date_paid (YYYY-MM-DD), vendor, description, amount, business_purpose, property_stays_personal (Y/N), receipt_url. Preview first; a file with any error is not imported at all.</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Columns: owner email, date_paid (YYYY-MM-DD), vendor, description, amount, business_purpose, property_stays_personal (Y/N), receipt_url, and optionally business_amount and allocation_note. Preview first; a file with any error is not imported at all.</Typography>
         <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ alignItems: { sm: "center" }, mb: 2 }}>
           <Button component="label" variant="outlined" startIcon={<UploadFileRounded />}>Choose CSV<input hidden type="file" accept=".csv,text/csv" onChange={(event) => { setFile(event.target.files[0] || null); setPreview(null); }} /></Button>
           <Typography color="text.secondary">{file ? file.name : "No file chosen"}</Typography>
@@ -155,21 +168,22 @@ function ImportDialog({ onClose, onSaved }) {
 
 function WindowSettings({ settings, onSaved }) {
   const { notify } = useApp();
-  const [values, setValues] = useState({ special_window_start: settings.special_window_start || "", special_window_end: settings.special_window_end || "", special_window_deadline: settings.special_window_deadline || "" });
+  const [values, setValues] = useState({ special_window_start: settings.special_window_start || "", special_window_end: settings.special_window_end || "", special_window_deadline: settings.special_window_deadline || "", standard_deadline_days: String(settings.standard_deadline_days ?? 30) });
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
   const save = async (event) => {
     event.preventDefault(); setSaving(true); setErrors({});
-    try { await api("/api/founder-expenses/settings/", { method: "POST", body: { special_window_start: values.special_window_start || null, special_window_end: values.special_window_end || null, special_window_deadline: values.special_window_deadline || null } }); notify("Logging window saved."); onSaved(); }
+    try { await api("/api/founder-expenses/settings/", { method: "POST", body: { special_window_start: values.special_window_start || null, special_window_end: values.special_window_end || null, special_window_deadline: values.special_window_deadline || null, standard_deadline_days: values.standard_deadline_days } }); notify("Logging deadlines saved."); onSaved(); }
     catch (failure) { setErrors({ ...(failure.fields || {}), __all__: failure.message }); } finally { setSaving(false); }
   };
   const date = (key, label) => <DateField label={label} value={values[key]} onChange={(value) => setValues({ ...values, [key]: value })} error={Boolean(fieldError(errors, key))} helperText={fieldError(errors, key)} />;
   return (
     <Paper component="form" onSubmit={save} variant="outlined" sx={{ p: { xs: 2, sm: 2.5 }, mt: 4, maxWidth: 820 }}>
-      <Typography variant="h3" sx={{ mb: 0.5 }}>Special logging window</Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Payments made from the first to the last date must be logged by the deadline. Entries logged later are flagged, not rejected. Leave all three empty for no window.</Typography>
+      <Typography variant="h3" sx={{ mb: 0.5 }}>Logging deadlines</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Payments made from the first to the last date of the special window must be logged by its log-by date; leave all three empty for no window. Every other payment must be logged within the standard number of days after it was paid. Entries logged later are flagged, not rejected.</Typography>
       {errors.__all__ && <Alert severity="error" sx={{ mb: 2 }}>{errors.__all__}</Alert>}
       <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "repeat(3, 1fr)" }, gap: 2 }}>{date("special_window_start", "First payment date")}{date("special_window_end", "Last payment date")}{date("special_window_deadline", "Log by")}</Box>
+      <TextField size="small" type="number" label="Standard deadline (days after payment)" value={values.standard_deadline_days} onChange={(event) => setValues({ ...values, standard_deadline_days: event.target.value })} slotProps={{ htmlInput: { min: 1, max: 366 } }} error={Boolean(fieldError(errors, "standard_deadline_days"))} helperText={fieldError(errors, "standard_deadline_days")} sx={{ mt: 2, minWidth: 280 }} />
       <Stack direction="row" sx={{ justifyContent: "flex-end", mt: 2 }}><SubmitButton saving={saving}>Save window</SubmitButton></Stack>
     </Paper>
   );
@@ -184,7 +198,7 @@ function Summary({ year, ownerId }) {
     <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "repeat(2, 1fr)" }, gap: 2, mb: 3 }}>
       {data.owners.map((owner) => <Card key={owner.owner_id} variant="outlined"><CardContent>
         <Stack sx={{ justifyContent: "space-between", alignItems: "baseline" }} direction="row"><Typography variant="h3">{owner.owner_name}</Typography><Typography sx={{ fontSize: 24, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{formatMoney(owner.total)}</Typography></Stack>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>{owner.count} entr{owner.count === 1 ? "y" : "ies"} in {data.year} · {owner.late_count} late · {owner.missing_receipts_count} missing {owner.missing_receipts_count === 1 ? "receipt" : "receipts"}</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>{owner.count} entr{owner.count === 1 ? "y" : "ies"} in {data.year} · business {formatMoney(owner.business_total)} · {owner.flagged_count} late · {owner.missing_receipts_count} missing {owner.missing_receipts_count === 1 ? "receipt" : "receipts"}</Typography>
         {owner.by_category.map((row) => <Stack key={row.category || "none"} direction="row" sx={{ justifyContent: "space-between", py: 0.25 }}><Typography variant="body2">{row.category ? `${row.category} · ${row.category_name || "Unknown account"}` : "Uncategorized"} ({row.count})</Typography><Typography variant="body2" sx={{ fontVariantNumeric: "tabular-nums" }}>{formatMoney(row.total)}</Typography></Stack>)}
         {owner.missing_receipts.length > 0 && <Box sx={{ mt: 1.5 }}><Typography variant="subtitle2">Missing receipts</Typography>{owner.missing_receipts.map((row) => <Typography key={row.id} variant="body2" color="text.secondary">{formatDate(row.date_paid)} · {row.vendor} · {formatMoney(row.amount)}</Typography>)}</Box>}
       </CardContent></Card>)}
@@ -213,11 +227,11 @@ export default function FounderExpensesPage() {
   const columns = [
     { key: "date_paid", label: "Paid", sx: { whiteSpace: "nowrap" }, render: (row) => formatDate(row.date_paid) },
     { key: "owner", label: "Owner", render: (row) => row.owner_name },
-    { key: "vendor", label: "Vendor and purpose", sx: { minWidth: 200 }, render: (row) => <><Typography sx={{ fontWeight: 700 }} sx={row.status === "withdrawn" ? { textDecoration: "line-through" } : undefined}>{row.vendor}</Typography><Typography variant="body2">{row.description}</Typography><Typography variant="caption" color="text.secondary">{row.business_purpose}{row.property_stays_personal ? " · Property stays personal" : ""}</Typography>{row.status === "withdrawn" && <Typography sx={{ display: "block" }} variant="caption" color="warning.main">Withdrawn: {row.withdrawn_reason}</Typography>}</> },
+    { key: "vendor", label: "Vendor and purpose", sx: { minWidth: 200 }, render: (row) => <><Typography sx={{ fontWeight: 700 }} sx={row.status === "withdrawn" ? { textDecoration: "line-through" } : undefined}>{row.vendor}</Typography><Typography variant="body2">{row.description}</Typography><Typography variant="caption" color="text.secondary">{row.business_purpose}{row.property_stays_personal ? " · Property stays personal" : ""}</Typography>{row.allocation_note && <Typography sx={{ display: "block" }} variant="caption" color="text.secondary">Allocation: {row.allocation_note}</Typography>}{row.status === "withdrawn" && <Typography sx={{ display: "block" }} variant="caption" color="warning.main">Withdrawn: {row.withdrawn_reason}</Typography>}</> },
     { key: "category", label: "Category", render: (row) => row.category ? `${row.category} · ${row.category_name || "?"}` : "—" },
-    { key: "amount", label: "Amount", align: "right", render: (row) => <Typography sx={{ fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{formatMoney(row.amount)}</Typography> },
+    { key: "amount", label: "Amount", align: "right", render: (row) => <><Typography sx={{ fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{formatMoney(row.amount)}</Typography>{row.business_amount !== row.amount && <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>Business {formatMoney(row.business_amount)}</Typography>}</> },
     { key: "receipts", label: "Receipt", render: (row) => <Stack spacing={0.25}>{row.receipts.map((item) => <Link key={item.id} href={item.download_url} variant="body2">{item.name}</Link>)}{row.receipt_url && <Link href={row.receipt_url} target="_blank" rel="noreferrer noopener" variant="body2">Link</Link>}{!row.has_receipt && "—"}</Stack> },
-    { key: "logged", label: "Logged", sx: { whiteSpace: "nowrap" }, render: (row) => <><Typography variant="body2">{formatDate(row.logged_at)}</Typography><Typography variant="caption" color="text.secondary">{row.days_to_log} {row.days_to_log === 1 ? "day" : "days"} after{row.source === "csv_import" ? " · CSV" : ""}</Typography></> },
+    { key: "logged", label: "Logged", sx: { whiteSpace: "nowrap" }, render: (row) => <><Typography variant="body2">{formatDate(row.logged_at)}</Typography><Typography variant="caption" color="text.secondary">{row.days_to_log} {row.days_to_log === 1 ? "day" : "days"} after{row.source === "csv_import" ? " · CSV" : ""}</Typography><Typography sx={{ display: "block" }} variant="caption" color={row.late ? "warning.main" : "text.secondary"}>Deadline {formatDate(row.deadline)}</Typography></> },
     { key: "flags", label: "Flags", sx: { minWidth: 130 }, render: (row) => <Flags row={row} /> },
     ...(canEdit ? [{ key: "actions", label: "", align: "right", render: (row) => row.status === "logged" && <Stack sx={{ justifyContent: "flex-end" }} direction="row" spacing={0.5}><Button size="small" startIcon={<EditRounded />} onClick={() => setEditing(row)}>Edit</Button><Button size="small" color="warning" startIcon={<UndoRounded />} onClick={() => setWithdrawing(row)}>Withdraw</Button></Stack> }] : []),
   ];
