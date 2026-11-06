@@ -214,13 +214,22 @@ def restore_entry(*, entry, user):
     return entry
 
 
-def add_attachment(entry, upload, user):
-    allowed = {"application/pdf", "image/jpeg", "image/png", "image/webp"}
+ATTACHMENT_TYPES = {"application/pdf", "image/jpeg", "image/png", "image/webp"}
+ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
+
+
+def validate_upload(upload):
+    """The one rule for every stored file: a PDF or image no larger than 25 MB. Returns its content type."""
     content_type = getattr(upload, "content_type", "")
-    if upload.size > 25 * 1024 * 1024:
+    if upload.size > ATTACHMENT_MAX_BYTES:
         raise PostingError("Attachments must be 25 MB or smaller.")
-    if content_type not in allowed:
+    if content_type not in ATTACHMENT_TYPES:
         raise PostingError("Attachments must be PDF, JPEG, PNG, or WebP files.")
+    return content_type
+
+
+def add_attachment(entry, upload, user):
+    content_type = validate_upload(upload)
     return Attachment.objects.create(
         entry=entry,
         file=upload,

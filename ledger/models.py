@@ -590,3 +590,95 @@ class StatementBalance(models.Model):
 
     def __str__(self):
         return f"{self.account} statement {self.statement_end_date}"
+
+
+# -- Founder-borne expenses ----------------------------------------------------
+#
+# Business expenses an owner paid personally and agreed to bear without
+# reimbursement. They are a log kept beside the books, never part of them:
+# nothing here references a journal entry, account, or period, and nothing
+# posts to the ledger or appears in a company report.
+
+
+def founder_receipt_path(instance, filename):
+    suffix = Path(filename).suffix.lower()
+    return f"attachments/founder/{instance.expense.date_paid:%Y/%m}/{uuid4().hex}{suffix}"
+
+
+class FounderExpense(TimeStampedModel):
+    class Source(models.TextChoices):
+        MANUAL = "manual", "Manual"
+        CSV_IMPORT = "csv_import", "CSV import"
+
+    class Status(models.TextChoices):
+        LOGGED = "logged", "Logged"
+        WITHDRAWN = "withdrawn", "Withdrawn"
+
+    owner_contact = models.ForeignKey(Contact, on_delete=models.PROTECT, related_name="founder_expenses", limit_choices_to={"kind": Contact.Kind.OWNER})
+    date_paid = models.DateField()
+    vendor = models.CharField(max_length=160)
+    description = models.CharField(max_length=240)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    business_purpose = models.TextField()
+    property_stays_personal = models.BooleanField(default=False)
+    # An expense account code, used as a label only. Not a foreign key: these never touch an account.
+    category = models.CharField(max_length=20, blank=True)
+    receipt_url = models.URLField(max_length=500, blank=True)
+    logged_at = models.DateTimeField(auto_now_add=True)
+    source = models.CharField(max_length=20, choices=Source.choices, default=Source.MANUAL)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.LOGGED)
+    withdrawn_reason = models.TextField(blank=True)
+    withdrawn_at = models.DateTimeField(null=True, blank=True)
+    withdrawn_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+
+    class Meta:
+        db_table = "founder_expenses"
+        ordering = ["-date_paid", "-pk"]
+        constraints = [models.CheckConstraint(condition=Q(amount__gt=0), name="founder_expense_amount_positive")]
+
+    def __str__(self):
+        return f"{self.owner_contact} {self.date_paid} {self.vendor} {self.amount}"
+
+
+class FounderExpenseReceipt(models.Model):
+    expense = models.ForeignKey(FounderExpense, on_delete=models.CASCADE, related_name="receipts")
+    file = models.FileField(upload_to=founder_receipt_path)
+    original_name = models.CharField(max_length=255)
+    content_type = models.CharField(max_length=120, blank=True)
+    size = models.PositiveBigIntegerField(default=0)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL, related_name="+")
+
+    class Meta:
+        ordering = ["uploaded_at", "pk"]
+
+    def __str__(self):
+        return self.original_name
+
+
+class FounderExpenseSettings(models.Model):
+    """The special logging window: payments in [start, end] must be logged by deadline."""
+
+    special_window_start = models.DateField(null=True, blank=True)
+    special_window_end = models.DateField(null=True, blank=True)
+    special_window_deadline = models.DateField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+
+    class Meta:
+        verbose_name = "founder expense settings"
+        verbose_name_plural = "founder expense settings"
+
+    def __str__(self):
+        return "founder expense settings"
+
+    @classmethod
+    def load(cls):
+        found, _ = cls.objects.get_or_create(pk=1)
+        return found
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)

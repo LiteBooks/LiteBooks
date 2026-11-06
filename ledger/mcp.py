@@ -52,6 +52,7 @@ from .permissions import ROLE_LEVEL, user_role
 from .reporting import aging, balance_sheet, income_statement, owner_balances, trial_balance
 from .apps import PROCESS_STARTED_AT
 from .sync import is_synced_account, mark_synced, sync_status, synced_accounts
+from . import founder
 from .services import (
     create_document,
     create_entry,
@@ -87,6 +88,8 @@ Invoices (money owed to the business) and bills (money it owes) are documents: c
 Money moving between an owner and the business (equity contributions, draws, loans to the business, and loan repayments) is recorded with record_owner_activity, which tags the owner so owner_balances stays right.
 
 For partnership tax work, ownership percentages over time come from list_owner_interests and ownership_as_of. partner_allocation_report splits income among owners when ownership changes mid-year, and capital_account_rollforward builds each owner's capital account. Ownership is entered in the web app only, and allocations are reports: they are never posted to the ledger.
+
+Founder-borne expenses (list_founder_expenses, founder_expense_summary) are business expenses an owner paid personally and agreed not to be reimbursed for. They are NOT company expenses: never add them to company totals, financial statements, or the company's tax return. They support each owner's personal return (unreimbursed partnership expenses). They are entered in the web app only.
 
 Before relying on totals, call account_sync_status to see when each bank and card account was last synced and how its book balance compares with the latest statement, and say how current the books are. server_info reports which LiteBooks build you are connected to and which tools it offers.
 
@@ -1505,6 +1508,64 @@ def account_sync_status(user, args):
     else:
         accounts = synced_accounts()
     return {"accounts": [sync_status(account) for account in accounts]}
+
+
+# -- Founder-borne expenses -------------------------------------------------------
+#
+# Read only, and outside the books: these are owners' own unreimbursed expenses,
+# never company expenses. Entries are made in the web app or by its CSV import.
+
+MCP_EXPENSE_FIELDS = (
+    "id", "owner_id", "owner_name", "date_paid", "vendor", "description", "amount", "category", "business_purpose",
+    "property_stays_personal", "has_receipt", "logged_at", "days_to_log", "late", "in_special_window", "special_window_late",
+    "approval_reminder", "status", "withdrawn_reason",
+)
+
+
+def owner_filter(args):
+    if args.get("owner_id") is None:
+        return None
+    owner = get_contact(args["owner_id"], "owner_id")
+    if owner.kind != Contact.Kind.OWNER:
+        raise ToolError(f"owner_id {owner.pk} is a {owner.kind}, not an owner. Call list_contacts with kind=owner.")
+    return owner.pk
+
+
+@tool(
+    "list_founder_expenses",
+    "Founder-borne expenses: business expenses an owner paid personally and agreed to bear without reimbursement. NOT company expenses and never in the company's books, reports, or tax return; they support the owner's personal return. Filter by owner and by date paid (both ends inclusive). Flags are informational: late (logged more than 30 days after payment), special_window_late (paid in the special logging window and logged after its deadline), approval_reminder ($250 or more; may need approval if it creates a company obligation). Withdrawn entries are left out unless include_withdrawn is true.",
+    {
+        "owner_id": {"type": "integer"},
+        "start": {"type": "string", "description": "YYYY-MM-DD, earliest date paid."},
+        "end": {"type": "string", "description": "YYYY-MM-DD, latest date paid."},
+        "include_withdrawn": {"type": "boolean", "default": False},
+    },
+)
+def list_founder_expenses(user, args):
+    start, end = optional_date(args, "start"), optional_date(args, "end")
+    if start and end and start > end:
+        raise ToolError("start must be on or before end.")
+    window = founder.FounderExpenseSettings.load()
+    names = founder.category_names()
+    rows = founder.expenses(owner_id=owner_filter(args), start=start, end=end, include_withdrawn=bool(args.get("include_withdrawn")))
+    return {"founder_expenses": [{key: row[key] for key in MCP_EXPENSE_FIELDS} for row in (founder.expense_json(item, window, names) for item in rows)]}
+
+
+@tool(
+    "founder_expense_summary",
+    "Per owner, a year's founder-borne expenses (by date paid, withdrawn entries excluded): total, count, totals by category, how many were logged late, and how many have no receipt. For the owner's personal return; never include these in company totals.",
+    {"year": {"type": "integer"}, "owner_id": {"type": "integer"}},
+    required=("year",),
+)
+def founder_expense_summary(user, args):
+    try:
+        year = int(required(args, "year"))
+    except (TypeError, ValueError) as exc:
+        raise ToolError("year must be a whole number such as 2026.") from exc
+    if not 1900 <= year <= 9999:
+        raise ToolError("year must be a four-digit year.")
+    rows = founder.summary(year, owner_id=owner_filter(args))
+    return {"year": year, "owners": [{key: value for key, value in row.items() if key != "missing_receipts"} for row in rows]}
 
 
 # -- Transport ----------------------------------------------------------------

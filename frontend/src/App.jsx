@@ -8,6 +8,7 @@ import { AccountsList, AccountDetail, AccountForm } from "./pages/Accounts";
 import AuditPage from "./pages/Audit";
 import { ContactsList, ContactForm } from "./pages/Contacts";
 import { DocumentsList, DocumentDetail, DocumentForm, PaymentForm } from "./pages/Documents";
+import FounderExpensesPage from "./pages/FounderExpenses";
 import LoginPage from "./pages/Login";
 import { OwnersList, OwnerActivityForm } from "./pages/Owners";
 import { PartnershipSettingsPage } from "./pages/Partnership";
@@ -65,6 +66,7 @@ export default function App() {
         <Route path="/settings/updates/" element={<SystemUpdatePage />} />
         <Route path="/settings/ai/" element={<AiAccessPage />} />
         <Route path="/audit/" element={<AuditPage />} />
+        <Route path="/founder-expenses/" element={<FounderExpensesPage />} />
         <Route path="*" element={<NotFound />} />
       </Routes>
     </Layout>

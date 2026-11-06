@@ -36,6 +36,7 @@ urlpatterns = [
     path("settings/updates/", spa.spa, name="system-update"),
     path("settings/ai/", spa.spa, name="ai-access"),
     path("audit/", spa.spa, name="audit-list"),
+    path("founder-expenses/", spa.spa, name="founder-expenses"),
     path("attachments/<int:pk>/download/", views.attachment_download, name="attachment-download"),
     path("export/excel/", views.export_workbook, name="export-workbook"),
 ]

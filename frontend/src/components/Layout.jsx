@@ -17,6 +17,7 @@ import ManageAccountsRounded from "@mui/icons-material/ManageAccountsRounded";
 import MenuRounded from "@mui/icons-material/MenuRounded";
 import PeopleRounded from "@mui/icons-material/PeopleRounded";
 import ReceiptLongRounded from "@mui/icons-material/ReceiptLongRounded";
+import WalletRounded from "@mui/icons-material/WalletRounded";
 import PieChartRounded from "@mui/icons-material/PieChartRounded";
 import SettingsRounded from "@mui/icons-material/SettingsRounded";
 import SystemUpdateAltRounded from "@mui/icons-material/SystemUpdateAltRounded";
@@ -63,6 +64,10 @@ export default function Layout({ children }) {
       </Toolbar>
       <Divider sx={{ borderColor: "rgba(255,255,255,.1)" }} />
       <List sx={{ pt: 1.5 }}>{mainItems.map(([label, to, Icon]) => <NavItem key={to} label={label} to={to} Icon={Icon} onClick={close} />)}</List>
+      {/* Kept apart from the books on purpose: these are owners' own expenses, never company ones. */}
+      <Divider sx={{ borderColor: "rgba(255,255,255,.1)", mx: 2, mt: 1 }} />
+      <Typography variant="overline" sx={{ px: 3, pt: 1.5, color: "rgba(255,255,255,.5)", lineHeight: 1.5 }}>Outside the books</Typography>
+      <List sx={{ pt: 0 }}><NavItem label="Founder expense log" to="/founder-expenses/" Icon={WalletRounded} onClick={close} /></List>
       <Box sx={{ mt: "auto", pb: 1.5 }}>
         {session.permissions.administer && <><NavItem label="Period locks" to="/settings/periods/" Icon={SettingsRounded} onClick={close} /><NavItem label="Partnership" to="/settings/partnership/" Icon={PieChartRounded} onClick={close} /><NavItem label="Users" to="/settings/users/" Icon={PeopleRounded} onClick={close} /><NavItem label="Software update" to="/settings/updates/" Icon={SystemUpdateAltRounded} onClick={close} badge={Boolean(session.update_available)} /></>}
         <NavItem label="AI access" to="/settings/ai/" Icon={AutoAwesomeRounded} onClick={close} />

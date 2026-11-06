@@ -9,19 +9,19 @@ from django.contrib.auth import authenticate, get_user_model, login, logout, upd
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import ProtectedError, Q, Sum
-from django.http import HttpResponse, JsonResponse
+from django.http import FileResponse, HttpResponse, JsonResponse
 from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 
 from .forms import AccountForm, AccountingPeriodForm, BusinessDocumentForm, ContactForm, ProfileForm, UserCreateForm, UserUpdateForm
-from .models import Account, AccountingPeriod, ApiToken, AuditEvent, BusinessDocument, Contact, JournalEntry, JournalLine, OwnerActivity, OwnerInterestPeriod, PartnershipSettings, ReservedInterestPeriod, UserProfile
+from .models import Account, AccountingPeriod, ApiToken, AuditEvent, BusinessDocument, Contact, FounderExpense, FounderExpenseReceipt, FounderExpenseSettings, JournalEntry, JournalLine, OwnerActivity, OwnerInterestPeriod, PartnershipSettings, ReservedInterestPeriod, UserProfile
 from .partnership import capital_account_rollforward, delete_interest, end_interest, owner_interest_json, partner_allocation_report, reserved_interest_json, save_owner_interest, save_reserved_interest, save_settings, settings_json
 from .permissions import ROLE_LEVEL, user_role
 from .reporting import account_rows, aging, balance_sheet, income_statement, owner_balances, trial_balance
 from .services import can_delete_entry, can_edit_document, create_document, create_entry, create_owner_activity, create_payment, delete_entry, record_audit, restore_entry, update_document, update_entry, update_owner_activity
-from . import updates
+from . import founder, updates
 from .sync import is_synced_account, record_statement_balance, sync_status
 
 
@@ -976,3 +976,133 @@ def partnership_report_csv_api(request, report):
     response = HttpResponse(output.getvalue(), content_type="text/csv")
     response["Content-Disposition"] = f'attachment; filename="{report}-{data["start"]}-to-{data["end"]}.csv"'
     return response
+
+
+# -- Founder-borne expense log ----------------------------------------------------
+#
+# Kept apart from the books: these endpoints only touch the founder expense
+# tables (and the audit log), never the ledger.
+
+
+def founder_filters(request):
+    owner_id = request.GET.get("owner_id") or None
+    year = request.GET.get("year") or None
+    try:
+        return {
+            "owner_id": int(owner_id) if owner_id else None,
+            "year": int(year) if year else None,
+            "include_withdrawn": request.GET.get("include_withdrawn") in {"1", "true", "yes"},
+        }
+    except ValueError as exc:
+        raise ValidationError({"__all__": "owner_id and year must be whole numbers."}) from exc
+
+
+@api_view(methods=("GET", "POST"))
+def founder_expenses_api(request):
+    if request.method == "POST":
+        if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.BOOKKEEPER]:
+            return JsonResponse({"error": "You do not have permission to perform this action."}, status=403)
+        expense = founder.create_expense(user=request.user, data=request_data(request), receipts=request.FILES.getlist("receipts"))
+        return JsonResponse({"entry": founder.expense_json(expense)}, status=201)
+    filters = founder_filters(request)
+    window = FounderExpenseSettings.load()
+    names = founder.category_names()
+    return JsonResponse({
+        "entries": [founder.expense_json(item, window, names) for item in founder.expenses(**filters)],
+        "settings": founder.settings_json(window),
+    })
+
+
+@api_view()
+def founder_expense_summary_api(request):
+    filters = founder_filters(request)
+    year = filters["year"] or timezone.localdate().year
+    return JsonResponse({"year": year, "owners": founder.summary(year, owner_id=filters["owner_id"])})
+
+
+@api_view(methods=("GET", "POST"))
+def founder_expense_api(request, pk):
+    expense = get_object_or_404(FounderExpense.objects.select_related("owner_contact").prefetch_related("receipts"), pk=pk)
+    if request.method == "POST":
+        if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.BOOKKEEPER]:
+            return JsonResponse({"error": "You do not have permission to perform this action."}, status=403)
+        expense = founder.update_expense(user=request.user, expense=expense, data=request_data(request), receipts=request.FILES.getlist("receipts"))
+        expense = FounderExpense.objects.prefetch_related("receipts").get(pk=expense.pk)
+    return JsonResponse({"entry": founder.expense_json(expense)})
+
+
+@api_view(methods=("POST",), minimum_role=UserProfile.Role.BOOKKEEPER)
+def founder_expense_withdraw_api(request, pk):
+    expense = get_object_or_404(FounderExpense, pk=pk)
+    expense = founder.withdraw_expense(user=request.user, expense=expense, reason=request_data(request).get("reason"))
+    return JsonResponse({"entry": founder.expense_json(expense)})
+
+
+@api_view(methods=("POST",), minimum_role=UserProfile.Role.BOOKKEEPER)
+def founder_expense_receipts_api(request, pk):
+    expense = get_object_or_404(FounderExpense, pk=pk)
+    founder.upload_receipts(user=request.user, expense=expense, receipts=request.FILES.getlist("receipts"))
+    return JsonResponse({"entry": founder.expense_json(FounderExpense.objects.prefetch_related("receipts").get(pk=pk))}, status=201)
+
+
+@api_view(methods=("GET", "DELETE"))
+def founder_receipt_api(request, pk):
+    receipt = get_object_or_404(FounderExpenseReceipt.objects.select_related("expense"), pk=pk)
+    if request.method == "DELETE":
+        if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.BOOKKEEPER]:
+            return JsonResponse({"error": "You do not have permission to perform this action."}, status=403)
+        expense_id = receipt.expense_id
+        founder.remove_receipt(user=request.user, receipt=receipt)
+        return JsonResponse({"entry": founder.expense_json(FounderExpense.objects.prefetch_related("receipts").get(pk=expense_id))})
+    try:
+        return FileResponse(receipt.file.open("rb"), as_attachment=True, filename=receipt.original_name)
+    except FileNotFoundError:
+        return JsonResponse({"error": "The receipt file is missing."}, status=404)
+
+
+@api_view(methods=("POST",), minimum_role=UserProfile.Role.BOOKKEEPER)
+def founder_expense_import_api(request):
+    upload = request.FILES.get("file")
+    if upload is None:
+        return JsonResponse({"error": "Choose a CSV file.", "fields": {"file": ["Choose a CSV file."]}}, status=400)
+    commit = request.POST.get("commit") in {"1", "true", "yes"}
+    return JsonResponse(founder.import_csv(user=request.user, upload=upload, commit=commit))
+
+
+@api_view()
+def founder_expense_export_api(request):
+    filters = founder_filters(request)
+    window = FounderExpenseSettings.load()
+    names = founder.category_names()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Not company expenses. Not included in company books or tax returns."])
+    writer.writerow(["Id", "Owner", "Owner email", "Date paid", "Vendor", "Description", "Amount", "Category", "Category name", "Business purpose", "Property stays personal", "Has receipt", "Receipt link", "Receipt files", "Logged at", "Days to log", "Late", "In special window", "Special window late", "Approval reminder", "Source", "Status", "Withdrawn reason"])
+    for expense in founder.expenses(**filters):
+        row = founder.expense_json(expense, window, names)
+        writer.writerow([
+            row["id"], row["owner_name"], expense.owner_contact.email, row["date_paid"], row["vendor"], row["description"], row["amount"],
+            row["category"] or "", row["category_name"], row["business_purpose"], "Y" if row["property_stays_personal"] else "N",
+            "Y" if row["has_receipt"] else "N", row["receipt_url"], "; ".join(item["name"] for item in row["receipts"]),
+            row["logged_at"], row["days_to_log"], "Y" if row["late"] else "N", "Y" if row["in_special_window"] else "N",
+            "Y" if row["special_window_late"] else "N", "Y" if row["approval_reminder"] else "N", row["source"], row["status"], row["withdrawn_reason"],
+        ])
+    suffix = f"-{filters['year']}" if filters["year"] else ""
+    response = HttpResponse(output.getvalue(), content_type="text/csv")
+    response["Content-Disposition"] = f'attachment; filename="founder-expenses{suffix}.csv"'
+    return response
+
+
+@api_view(methods=("GET", "POST"))
+def founder_expense_settings_api(request):
+    if request.method == "POST":
+        if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.ADMIN]:
+            return JsonResponse({"error": "Administrator access is required to change the logging window."}, status=403)
+        data = request_data(request)
+        founder.save_settings(
+            user=request.user,
+            start=optional_date_value(data.get("special_window_start"), "special_window_start"),
+            end=optional_date_value(data.get("special_window_end"), "special_window_end"),
+            deadline=optional_date_value(data.get("special_window_deadline"), "special_window_deadline"),
+        )
+    return JsonResponse({"settings": founder.settings_json()})
