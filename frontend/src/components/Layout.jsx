@@ -17,6 +17,7 @@ import ManageAccountsRounded from "@mui/icons-material/ManageAccountsRounded";
 import MenuRounded from "@mui/icons-material/MenuRounded";
 import PeopleRounded from "@mui/icons-material/PeopleRounded";
 import ReceiptLongRounded from "@mui/icons-material/ReceiptLongRounded";
+import PieChartRounded from "@mui/icons-material/PieChartRounded";
 import SettingsRounded from "@mui/icons-material/SettingsRounded";
 import SystemUpdateAltRounded from "@mui/icons-material/SystemUpdateAltRounded";
 import { useTheme } from "@mui/material/styles";
@@ -63,7 +64,7 @@ export default function Layout({ children }) {
       <Divider sx={{ borderColor: "rgba(255,255,255,.1)" }} />
       <List sx={{ pt: 1.5 }}>{mainItems.map(([label, to, Icon]) => <NavItem key={to} label={label} to={to} Icon={Icon} onClick={close} />)}</List>
       <Box sx={{ mt: "auto", pb: 1.5 }}>
-        {session.permissions.administer && <><NavItem label="Period locks" to="/settings/periods/" Icon={SettingsRounded} onClick={close} /><NavItem label="Users" to="/settings/users/" Icon={PeopleRounded} onClick={close} /><NavItem label="Software update" to="/settings/updates/" Icon={SystemUpdateAltRounded} onClick={close} badge={Boolean(session.update_available)} /></>}
+        {session.permissions.administer && <><NavItem label="Period locks" to="/settings/periods/" Icon={SettingsRounded} onClick={close} /><NavItem label="Partnership" to="/settings/partnership/" Icon={PieChartRounded} onClick={close} /><NavItem label="Users" to="/settings/users/" Icon={PeopleRounded} onClick={close} /><NavItem label="Software update" to="/settings/updates/" Icon={SystemUpdateAltRounded} onClick={close} badge={Boolean(session.update_available)} /></>}
         <NavItem label="AI access" to="/settings/ai/" Icon={AutoAwesomeRounded} onClick={close} />
         <NavItem label="Audit history" to="/audit/" Icon={FactCheckRounded} onClick={close} />
         <ListItemButton onClick={signOut} sx={{ mx: 1, mt: 0.25, borderRadius: 1, color: "rgba(255,255,255,.78)", "&:hover": { bgcolor: "rgba(255,255,255,.08)" } }}>

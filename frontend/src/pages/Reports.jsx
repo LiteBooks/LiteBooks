@@ -4,10 +4,12 @@ import { Box, Button, Card, CardActionArea, CardContent, Link, Paper, Stack, Tab
 import AccountBalanceWalletRounded from "@mui/icons-material/AccountBalanceWalletRounded";
 import AssessmentRounded from "@mui/icons-material/AssessmentRounded";
 import DownloadRounded from "@mui/icons-material/DownloadRounded";
+import PieChartRounded from "@mui/icons-material/PieChartRounded";
 import PrintRounded from "@mui/icons-material/PrintRounded";
 import ReceiptLongRounded from "@mui/icons-material/ReceiptLongRounded";
 import ScheduleRounded from "@mui/icons-material/ScheduleRounded";
 import { DataTable, DateField, ErrorState, formatDate, formatMoney, LoadingState, localToday, Page, useApiData } from "../components/Common";
+import { CapitalRollforwardBody, PartnerAllocationBody } from "./Partnership";
 
 const reports = [
   ["balance-sheet", "Balance sheet", "Assets, liabilities, and equity as of a date", AccountBalanceWalletRounded],
@@ -17,7 +19,10 @@ const reports = [
   ["receivables-aging", "Receivables aging", "Open customer invoices by age", ScheduleRounded],
   ["payables-aging", "Payables aging", "Open vendor bills by age", ScheduleRounded],
   ["owner-balances", "Owner balances", "Contributions, draws, and loans payable", AccountBalanceWalletRounded],
+  ["partner-allocation", "Partner allocation", "Income split among owners as ownership changes", PieChartRounded],
+  ["capital-rollforward", "Capital account rollforward", "Each owner's capital from beginning to end of a period", AccountBalanceWalletRounded],
 ];
+const csvReports = ["partner-allocation", "capital-rollforward"];
 
 export function ReportsIndex() {
   return (
@@ -39,11 +44,11 @@ export function ReportDetail() {
   const [filters, setFilters] = useState({ as_of: dateNow, start: `${dateNow.slice(0, 4)}-01-01`, end: dateNow });
   const [query, setQuery] = useState("");
   const { data, loading, error } = useApiData(`/api/reports/${report}/${query}`, [report, query]);
-  const ranged = ["income-statement", "general-ledger"].includes(report);
+  const ranged = ["income-statement", "general-ledger", ...csvReports].includes(report);
   const run = (event) => { event.preventDefault(); const params = new URLSearchParams(ranged ? { start: filters.start, end: filters.end } : { as_of: filters.as_of }); setQuery(`?${params}`); };
   const title = data?.title || reports.find(([slug]) => slug === report)?.[1] || "Report";
   return (
-    <Page title={title} eyebrow="Financial report" crumbs={[{ label: "Reports", to: "/reports/" }, { label: title }]} actions={<Button variant="outlined" startIcon={<PrintRounded />} onClick={() => window.print()}>Print</Button>}>
+    <Page title={title} eyebrow="Financial report" crumbs={[{ label: "Reports", to: "/reports/" }, { label: title }]} actions={<Stack direction="row" spacing={1}>{csvReports.includes(report) && data && <Button component="a" href={`/api/reports/${report}/csv/?${new URLSearchParams({ start: data.start, end: data.end })}`} variant="outlined" startIcon={<DownloadRounded />}>Export CSV</Button>}<Button variant="outlined" startIcon={<PrintRounded />} onClick={() => window.print()}>Print</Button></Stack>}>
       <Paper component="form" onSubmit={run} variant="outlined" sx={{ p: 2, mb: 3, display: "flex", gap: 1.5, alignItems: "center", flexWrap: "wrap", "@media print": { display: "none" } }}>
         {ranged ? <><DateField label="From" value={filters.start} onChange={(value) => setFilters({ ...filters, start: value })} sx={{ width: 180 }} /><DateField label="Through" value={filters.end} onChange={(value) => setFilters({ ...filters, end: value })} sx={{ width: 180 }} /></> : <DateField label="As of" value={filters.as_of} onChange={(value) => setFilters({ ...filters, as_of: value })} sx={{ width: 180 }} />}
         <Button type="submit" variant="contained">Run report</Button>
@@ -73,5 +78,7 @@ function ReportBody({ data }) {
   if (data.report === "owner-balances") return <DataTable rows={data.rows} getKey={(row) => row.owner.id} columns={[
     { key: "owner", label: "Owner", render: (row) => row.owner.name }, { key: "contributions", label: "Contributions", align: "right", render: (row) => formatMoney(row.contributions) }, { key: "draws", label: "Draws", align: "right", render: (row) => formatMoney(row.draws) }, { key: "owed", label: "Amount owed", align: "right", render: (row) => formatMoney(row.owed) },
   ]} />;
+  if (data.report === "partner-allocation") return <PartnerAllocationBody data={data} />;
+  if (data.report === "capital-rollforward") return <CapitalRollforwardBody data={data} />;
   return null;
 }

@@ -10,6 +10,7 @@ import { ContactsList, ContactForm } from "./pages/Contacts";
 import { DocumentsList, DocumentDetail, DocumentForm, PaymentForm } from "./pages/Documents";
 import LoginPage from "./pages/Login";
 import { OwnersList, OwnerActivityForm } from "./pages/Owners";
+import { PartnershipSettingsPage } from "./pages/Partnership";
 import { ReportDetail, ReportsIndex } from "./pages/Reports";
 import { AiAccessPage, PeriodsPage, ProfilePage, UserEditPage, UsersPage } from "./pages/Settings";
 import SystemUpdatePage from "./pages/SystemUpdate";
@@ -57,6 +58,7 @@ export default function App() {
         <Route path="/reports/" element={<ReportsIndex />} />
         <Route path="/reports/:report/" element={<ReportDetail />} />
         <Route path="/settings/periods/" element={<PeriodsPage />} />
+        <Route path="/settings/partnership/" element={<PartnershipSettingsPage />} />
         <Route path="/settings/profile/" element={<ProfilePage />} />
         <Route path="/settings/users/" element={<UsersPage />} />
         <Route path="/settings/users/:id/edit/" element={<UserEditPage />} />

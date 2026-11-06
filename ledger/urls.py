@@ -29,6 +29,7 @@ urlpatterns = [
     path("reports/", spa.spa, name="reports"),
     path("reports/<slug:report>/", spa.spa, name="report-view"),
     path("settings/periods/", spa.spa, name="period-list"),
+    path("settings/partnership/", spa.spa, name="partnership-settings"),
     path("settings/profile/", spa.spa, name="profile-settings"),
     path("settings/users/", spa.spa, name="user-list"),
     path("settings/users/<int:pk>/edit/", spa.spa, name="user-edit"),

@@ -41,9 +41,13 @@ from .models import (
     JournalEntry,
     JournalLine,
     OwnerActivity,
+    OwnerInterestPeriod,
+    PartnershipSettings,
     Payment,
+    ReservedInterestPeriod,
     UserProfile,
 )
+from .partnership import capital_account_rollforward, owner_interest_json, ownership_as_of, partner_allocation_report, reserved_interest_json
 from .permissions import ROLE_LEVEL, user_role
 from .reporting import aging, balance_sheet, income_statement, owner_balances, trial_balance
 from .services import (
@@ -79,6 +83,8 @@ Adjusting, accrual, reclassification, and depreciation entries are posted with c
 Invoices (money owed to the business) and bills (money it owes) are documents: create them with create_document, never as journal entries, and record what is paid against them with record_payment. Each posts its own journal entry, so the ledger, the document's status, and the aging report stay in step.
 
 Money moving between an owner and the business (equity contributions, draws, loans to the business, and loan repayments) is recorded with record_owner_activity, which tags the owner so owner_balances stays right.
+
+For partnership tax work, ownership percentages over time come from list_owner_interests and ownership_as_of. partner_allocation_report splits income among owners when ownership changes mid-year, and capital_account_rollforward builds each owner's capital account. Ownership is entered in the web app only, and allocations are reports: they are never posted to the ledger.
 
 Amounts are decimal strings with two places. Dates are ISO 8601 (YYYY-MM-DD). Months that are closed in LiteBooks reject postings; call list_periods to see which are closed. To trace who changed a record and when, use search_audit_log.
 """
@@ -1376,6 +1382,85 @@ def general_ledger(user, args):
     if truncated:
         result["note"] = f"Only the first {limit} lines are shown. Narrow the date range or raise limit for the rest."
     return result
+
+
+# -- Partnership allocations ----------------------------------------------------
+#
+# Read only. Ownership percentages are entered in the web app, and allocations are
+# never posted: these tools report how income would be split, nothing more.
+
+
+@tool(
+    "list_owner_interests",
+    "Each owner's ownership percentage over time (effective-dated periods, both ends inclusive; a null effective_end is open-ended), plus reserved (unissued) interests such as an option pool.",
+    {
+        "owner_id": {"type": "integer", "description": "Only this owner's periods."},
+        "include_reserved": {"type": "boolean", "default": True},
+    },
+)
+def list_owner_interests(user, args):
+    periods = OwnerInterestPeriod.objects.select_related("owner_contact").order_by("owner_contact__name", "effective_start")
+    if args.get("owner_id") is not None:
+        owner = get_contact(args["owner_id"], "owner_id")
+        if owner.kind != Contact.Kind.OWNER:
+            raise ToolError(f"owner_id {owner.pk} is a {owner.kind}, not an owner. Call list_contacts with kind=owner.")
+        periods = periods.filter(owner_contact=owner)
+    result = {"owner_interests": [{key: value for key, value in owner_interest_json(period).items() if key != "id"} for period in periods]}
+    if args.get("include_reserved", True):
+        result["reserved_interests"] = [{key: value for key, value in reserved_interest_json(period).items() if key != "id"} for period in ReservedInterestPeriod.objects.order_by("label", "effective_start")]
+    return result
+
+
+@tool(
+    "ownership_as_of",
+    "Every owner's stated and effective ownership percentage on one date. Effective percentages apply the unissued interest policy (pro rata to issued: 45/45 with 10 reserved is 50/50). Owners who have left show 0.",
+    {"date": {"type": "string", "description": "YYYY-MM-DD"}},
+    required=("date",),
+)
+def ownership_as_of_tool(user, args):
+    return ownership_as_of(parse_date(required(args, "date"), "date"))
+
+
+@tool(
+    "partner_allocation_report",
+    "Split a date range's net income or loss among owners under IRC §706(d): the range is cut into segments wherever ownership changes (placed by the convention), each segment's posted revenue and expense is summed by transaction date, and allocated by that segment's effective percentages, rounded with the largest-remainder method so owner amounts add up exactly. Owner totals tie to income_statement net income for the range unless some days have no owners (see unallocated). Defaults come from the company's partnership settings. Nothing is posted.",
+    {
+        "start": {"type": "string", "description": "YYYY-MM-DD"},
+        "end": {"type": "string", "description": "YYYY-MM-DD"},
+        "method": {"type": "string", "enum": PartnershipSettings.Method.values, "description": "Override the saved allocation method."},
+        "convention": {"type": "string", "enum": PartnershipSettings.Convention.values, "description": "Override the saved convention."},
+        "change_day_belongs_to": {"type": "string", "enum": PartnershipSettings.ChangeDay.values, "description": "Under the calendar day convention, whether activity dated on a change date goes to the outgoing or the incoming owners. Overrides the saved setting."},
+    },
+    required=("start", "end"),
+)
+def partner_allocation_report_tool(user, args):
+    start, end = parse_date(required(args, "start"), "start"), parse_date(required(args, "end"), "end")
+    if start > end:
+        raise ToolError("start must be on or before end.")
+    return partner_allocation_report(start, end, method=args.get("method"), convention=args.get("convention"), change_day_belongs_to=args.get("change_day_belongs_to"))
+
+
+@tool(
+    "capital_account_rollforward",
+    "Each owner's capital account for a date range: beginning balance, contributions, draws, allocated income or loss (from partner_allocation_report), other equity movements such as capital transferred between owners, and ending balance. The beginning balance includes income allocated in earlier years under the current settings. Nothing is posted.",
+    {
+        "start": {"type": "string", "description": "YYYY-MM-DD"},
+        "end": {"type": "string", "description": "YYYY-MM-DD"},
+        "owner_id": {"type": "integer"},
+    },
+    required=("start", "end"),
+)
+def capital_account_rollforward_tool(user, args):
+    start, end = parse_date(required(args, "start"), "start"), parse_date(required(args, "end"), "end")
+    if start > end:
+        raise ToolError("start must be on or before end.")
+    owner_id = None
+    if args.get("owner_id") is not None:
+        owner = get_contact(args["owner_id"], "owner_id")
+        if owner.kind != Contact.Kind.OWNER:
+            raise ToolError(f"owner_id {owner.pk} is a {owner.kind}, not an owner. Call list_contacts with kind=owner.")
+        owner_id = owner.pk
+    return capital_account_rollforward(start, end, owner_id=owner_id)
 
 
 # -- Transport ----------------------------------------------------------------

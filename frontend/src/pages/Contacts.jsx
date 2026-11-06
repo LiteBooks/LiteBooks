@@ -6,6 +6,7 @@ import EditRounded from "@mui/icons-material/EditRounded";
 import { api } from "../api";
 import { DataTable, ErrorState, fieldError, FormActions, LoadingState, Page, PageLoading, useApiData } from "../components/Common";
 import { useApp } from "../context";
+import { OwnershipHistory } from "./Partnership";
 
 export function ContactsList() {
   const { session, options } = useApp();
@@ -61,6 +62,7 @@ export function ContactForm() {
         </Box>
         <FormActions saving={saving} submitLabel={`Save ${noun}`} cancelTo={returnTo} />
       </Paper>
+      {editing && detail.data?.contact.kind === "owner" && <OwnershipHistory ownerId={Number(id)} />}
     </Page>
   );
 }

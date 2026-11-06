@@ -450,3 +450,106 @@ class SystemUpdateRun(models.Model):
     @property
     def is_active(self):
         return self.status in self.ACTIVE_STATUSES
+
+
+PERCENT = {"max_digits": 7, "decimal_places": 4}
+
+
+class InterestPeriodFields(TimeStampedModel):
+    """The dated percentage shared by an owner's interest and an unissued (reserved) interest.
+
+    Both ends are inclusive; an open end means the percentage holds until changed.
+    """
+
+    effective_start = models.DateField()
+    effective_end = models.DateField(null=True, blank=True)
+    percentage = models.DecimalField(**PERCENT)
+    notes = models.TextField(blank=True)
+    source_document = models.TextField(blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+
+    class Meta:
+        abstract = True
+
+    def covers(self, day):
+        return self.effective_start <= day and (self.effective_end is None or day <= self.effective_end)
+
+
+def interest_period_constraints(prefix):
+    return [
+        models.CheckConstraint(condition=Q(percentage__gte=0, percentage__lte=100), name=f"{prefix}_percentage_range"),
+        models.CheckConstraint(condition=Q(effective_end__isnull=True) | Q(effective_end__gte=models.F("effective_start")), name=f"{prefix}_end_after_start"),
+    ]
+
+
+class OwnerInterestPeriod(InterestPeriodFields):
+    owner_contact = models.ForeignKey(Contact, on_delete=models.PROTECT, related_name="interest_periods", limit_choices_to={"kind": Contact.Kind.OWNER})
+
+    class Meta:
+        ordering = ["owner_contact__name", "effective_start"]
+        constraints = interest_period_constraints("owner_interest")
+
+    def __str__(self):
+        return f"{self.owner_contact} {self.percentage}% from {self.effective_start}"
+
+
+class ReservedInterestPeriod(InterestPeriodFields):
+    """An interest that is authorized but belongs to no owner, such as an option pool."""
+
+    label = models.CharField(max_length=120)
+
+    class Meta:
+        ordering = ["label", "effective_start"]
+        constraints = interest_period_constraints("reserved_interest")
+
+    def __str__(self):
+        return f"{self.label} {self.percentage}% from {self.effective_start}"
+
+
+class PartnershipSettings(models.Model):
+    """How partnership income is split among owners when ownership changes (IRC §706(d)).
+
+    LiteBooks keeps the books of one business, so this is a singleton.
+    """
+
+    class Method(models.TextChoices):
+        INTERIM_CLOSING = "interim_closing", "Interim closing of the books"
+        PRORATION = "proration", "Proration"
+
+    class Convention(models.TextChoices):
+        CALENDAR_DAY = "calendar_day", "Calendar day"
+        SEMI_MONTHLY = "semi_monthly", "Semi-monthly"
+        MONTHLY = "monthly", "Monthly"
+
+    class UnissuedPolicy(models.TextChoices):
+        PRO_RATA_TO_ISSUED = "pro_rata_to_issued", "Pro rata to issued interests"
+
+    class ChangeDay(models.TextChoices):
+        OUTGOING = "outgoing", "Outgoing owners"
+        INCOMING = "incoming", "Incoming owners"
+
+    allocation_method = models.CharField(max_length=20, choices=Method.choices, default=Method.INTERIM_CLOSING)
+    convention = models.CharField(max_length=20, choices=Convention.choices, default=Convention.CALENDAR_DAY)
+    unissued_allocation_policy = models.CharField(max_length=30, choices=UnissuedPolicy.choices, default=UnissuedPolicy.PRO_RATA_TO_ISSUED)
+    change_day_belongs_to = models.CharField(max_length=10, choices=ChangeDay.choices, default=ChangeDay.OUTGOING)
+    written_statement = models.TextField(blank=True)
+    written_statement_date = models.DateField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+
+    class Meta:
+        verbose_name = "partnership settings"
+        verbose_name_plural = "partnership settings"
+
+    def __str__(self):
+        return "partnership settings"
+
+    @classmethod
+    def load(cls):
+        found, _ = cls.objects.get_or_create(pk=1)
+        return found
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)

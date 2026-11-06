@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -7,14 +9,15 @@ from django.contrib.auth import authenticate, get_user_model, login, logout, upd
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import ProtectedError, Q, Sum
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 
 from .forms import AccountForm, AccountingPeriodForm, BusinessDocumentForm, ContactForm, ProfileForm, UserCreateForm, UserUpdateForm
-from .models import Account, AccountingPeriod, ApiToken, AuditEvent, BusinessDocument, Contact, JournalEntry, JournalLine, OwnerActivity, UserProfile
+from .models import Account, AccountingPeriod, ApiToken, AuditEvent, BusinessDocument, Contact, JournalEntry, JournalLine, OwnerActivity, OwnerInterestPeriod, PartnershipSettings, ReservedInterestPeriod, UserProfile
+from .partnership import capital_account_rollforward, delete_interest, end_interest, owner_interest_json, partner_allocation_report, reserved_interest_json, save_owner_interest, save_reserved_interest, save_settings, settings_json
 from .permissions import ROLE_LEVEL, user_role
 from .reporting import account_rows, aging, balance_sheet, income_statement, owner_balances, trial_balance
 from .services import can_delete_entry, can_edit_document, create_document, create_entry, create_owner_activity, create_payment, delete_entry, record_audit, restore_entry, update_document, update_entry, update_owner_activity
@@ -791,3 +794,167 @@ def system_update_apply_api(request):
 @api_view(minimum_role=UserProfile.Role.ADMIN)
 def system_update_status_api(request):
     return JsonResponse({"run": updates.run_json(updates.read_status()), "current": updates.current_version()})
+
+
+# -- Partnership: ownership over time and allocation reports -------------------
+
+
+def optional_date_value(value, field):
+    return date_value(value, field) if value not in (None, "") else None
+
+
+def owner_interest_fields(data, period=None):
+    owner = period.owner_contact if period else Contact.objects.filter(pk=data.get("owner_id") or None).first()
+    return {
+        "owner": owner,
+        "effective_start": date_value(data.get("effective_start"), "effective_start"),
+        "effective_end": optional_date_value(data.get("effective_end"), "effective_end"),
+        "percentage": data.get("percentage"),
+        "notes": data.get("notes", ""),
+        "source_document": data.get("source_document", ""),
+    }
+
+
+def reserved_interest_fields(data):
+    return {
+        "label": data.get("label", ""),
+        "effective_start": date_value(data.get("effective_start"), "effective_start"),
+        "effective_end": optional_date_value(data.get("effective_end"), "effective_end"),
+        "percentage": data.get("percentage"),
+        "notes": data.get("notes", ""),
+        "source_document": data.get("source_document", ""),
+    }
+
+
+def admin_required_response():
+    return JsonResponse({"error": "Administrator access is required to change ownership."}, status=403)
+
+
+@api_view(methods=("GET", "POST"))
+def owner_interests_api(request):
+    if request.method == "GET":
+        periods = OwnerInterestPeriod.objects.select_related("owner_contact")
+        if request.GET.get("owner_id"):
+            periods = periods.filter(owner_contact_id=request.GET["owner_id"])
+        return JsonResponse({"periods": [owner_interest_json(item) for item in periods]})
+    if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.ADMIN]:
+        return admin_required_response()
+    period = save_owner_interest(user=request.user, **owner_interest_fields(request_data(request)))
+    return JsonResponse({"period": owner_interest_json(period)}, status=201)
+
+
+@api_view(methods=("GET", "POST", "DELETE"))
+def owner_interest_api(request, pk):
+    period = get_object_or_404(OwnerInterestPeriod.objects.select_related("owner_contact"), pk=pk)
+    if request.method == "GET":
+        return JsonResponse({"period": owner_interest_json(period)})
+    if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.ADMIN]:
+        return admin_required_response()
+    if request.method == "DELETE":
+        delete_interest(user=request.user, period=period)
+        return JsonResponse({"ok": True})
+    period = save_owner_interest(user=request.user, period=period, **owner_interest_fields(request_data(request), period))
+    return JsonResponse({"period": owner_interest_json(period)})
+
+
+@api_view(methods=("GET", "POST"))
+def reserved_interests_api(request):
+    if request.method == "GET":
+        return JsonResponse({"periods": [reserved_interest_json(item) for item in ReservedInterestPeriod.objects.all()]})
+    if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.ADMIN]:
+        return admin_required_response()
+    period = save_reserved_interest(user=request.user, **reserved_interest_fields(request_data(request)))
+    return JsonResponse({"period": reserved_interest_json(period)}, status=201)
+
+
+@api_view(methods=("GET", "POST", "DELETE"))
+def reserved_interest_api(request, pk):
+    period = get_object_or_404(ReservedInterestPeriod, pk=pk)
+    if request.method == "GET":
+        return JsonResponse({"period": reserved_interest_json(period)})
+    if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.ADMIN]:
+        return admin_required_response()
+    if request.method == "DELETE":
+        delete_interest(user=request.user, period=period)
+        return JsonResponse({"ok": True})
+    period = save_reserved_interest(user=request.user, period=period, **reserved_interest_fields(request_data(request)))
+    return JsonResponse({"period": reserved_interest_json(period)})
+
+
+@api_view(methods=("POST",), minimum_role=UserProfile.Role.ADMIN)
+def interest_end_api(request, kind, pk):
+    model = OwnerInterestPeriod if kind == "owner" else ReservedInterestPeriod
+    period = get_object_or_404(model, pk=pk)
+    period = end_interest(user=request.user, period=period, effective_end=date_value(request_data(request).get("effective_end"), "effective_end"))
+    return JsonResponse({"period": owner_interest_json(period) if kind == "owner" else reserved_interest_json(period)})
+
+
+@api_view(methods=("GET", "POST"))
+def partnership_settings_api(request):
+    if request.method == "POST":
+        if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.ADMIN]:
+            return JsonResponse({"error": "Administrator access is required to change partnership settings."}, status=403)
+        data = request_data(request)
+        values = {key: data[key] for key in ("allocation_method", "convention", "unissued_allocation_policy", "change_day_belongs_to", "written_statement") if key in data}
+        if "written_statement_date" in data:
+            values["written_statement_date"] = optional_date_value(data["written_statement_date"], "written_statement_date")
+        save_settings(user=request.user, **values)
+    return JsonResponse({"settings": settings_json(PartnershipSettings.load())})
+
+
+PARTNERSHIP_REPORTS = {"partner-allocation": "Partner allocation", "capital-rollforward": "Capital account rollforward"}
+
+
+def partnership_report(request, report):
+    as_of = date_value(request.GET.get("as_of", date.today().isoformat()), "as_of")
+    start = date_value(request.GET.get("start", date(as_of.year, 1, 1).isoformat()), "start")
+    end = date_value(request.GET.get("end", as_of.isoformat()), "end")
+    if start > end:
+        raise ValidationError({"start": "The start date must be on or before the end date."})
+    base = {"report": report, "title": PARTNERSHIP_REPORTS[report], "as_of": as_of.isoformat(), "start": start.isoformat(), "end": end.isoformat()}
+    if report == "partner-allocation":
+        base.update(partner_allocation_report(start, end))
+    else:
+        owner_id = request.GET.get("owner_id") or None
+        base.update(capital_account_rollforward(start, end, owner_id=int(owner_id) if owner_id else None))
+    return base
+
+
+@api_view()
+def partnership_report_api(request, report):
+    if report not in PARTNERSHIP_REPORTS:
+        return JsonResponse({"error": "Report not found."}, status=404)
+    return JsonResponse(partnership_report(request, report))
+
+
+@api_view()
+def partnership_report_csv_api(request, report):
+    if report not in PARTNERSHIP_REPORTS:
+        return JsonResponse({"error": "Report not found."}, status=404)
+    data = partnership_report(request, report)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    if report == "partner-allocation":
+        writer.writerow(["Segment start", "Segment end", "Days", "Segment net income", "Allocated income", "Owner", "Owner id", "Stated %", "Effective %", "Amount"])
+        for segment in data["segments"]:
+            for row in segment["allocations"]:
+                writer.writerow([segment["start"], segment["end"], segment["days"], segment["net_income"], segment["allocated_income"], row["name"], row["owner_id"], row["stated_pct"], row["effective_pct"], row["amount"]])
+            if not segment["allocations"]:
+                writer.writerow([segment["start"], segment["end"], segment["days"], segment["net_income"], segment["allocated_income"], "Unallocated", "", "", "", segment["allocated_income"]])
+        writer.writerow([])
+        writer.writerow(["Totals by owner"])
+        for row in data["totals_by_owner"]:
+            writer.writerow(["", "", "", "", "", row["name"], row["owner_id"], "", "", row["amount"]])
+        writer.writerow(["", "", "", "", "", "Unallocated", "", "", "", data["unallocated"]])
+        writer.writerow(["", "", "", "", "", "Net income", "", "", "", data["net_income"]])
+        writer.writerow([])
+        writer.writerow(["Method", data["method"], "Convention", data["convention"], "Change day belongs to", data["change_day_belongs_to"]])
+    else:
+        writer.writerow(["Owner", "Owner id", "Beginning", "Contributions", "Draws", "Allocated income (loss)", "Other", "Ending"])
+        for row in data["owners"]:
+            writer.writerow([row["owner_name"], row["owner_id"], row["beginning"], row["contributions"], row["draws"], row["allocated_income_loss"], row["other"], row["ending"]])
+    for warning in data["warnings"]:
+        writer.writerow(["Note", warning])
+    response = HttpResponse(output.getvalue(), content_type="text/csv")
+    response["Content-Disposition"] = f'attachment; filename="{report}-{data["start"]}-to-{data["end"]}.csv"'
+    return response
