@@ -21,7 +21,7 @@ from .partnership import capital_account_rollforward, delete_interest, end_inter
 from .permissions import ROLE_LEVEL, user_role
 from .reporting import account_rows, aging, balance_sheet, income_statement, owner_balances, trial_balance
 from .services import can_delete_entry, can_edit_document, create_document, create_entry, create_owner_activity, create_payment, delete_entry, record_audit, restore_entry, update_document, update_entry, update_owner_activity
-from . import founder, updates
+from . import founder, transfers, updates
 from .sync import is_synced_account, record_statement_balance, sync_status
 
 
@@ -1091,6 +1091,15 @@ def founder_expense_export_api(request):
     response = HttpResponse(output.getvalue(), content_type="text/csv")
     response["Content-Disposition"] = f'attachment; filename="founder-expenses{suffix}.csv"'
     return response
+
+
+@api_view(methods=("GET", "POST"))
+def import_settings_api(request):
+    if request.method == "POST":
+        if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.ADMIN]:
+            return JsonResponse({"error": "Administrator access is required to change import settings."}, status=403)
+        transfers.save_match_window(user=request.user, days=request_data(request).get("transfer_match_window_days"))
+    return JsonResponse({"settings": transfers.settings_json()})
 
 
 @api_view(methods=("GET", "POST"))

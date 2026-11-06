@@ -13,7 +13,7 @@ import LoginPage from "./pages/Login";
 import { OwnersList, OwnerActivityForm } from "./pages/Owners";
 import { PartnershipSettingsPage } from "./pages/Partnership";
 import { ReportDetail, ReportsIndex } from "./pages/Reports";
-import { AiAccessPage, PeriodsPage, ProfilePage, UserEditPage, UsersPage } from "./pages/Settings";
+import { AiAccessPage, ImportSettingsPage, PeriodsPage, ProfilePage, UserEditPage, UsersPage } from "./pages/Settings";
 import SystemUpdatePage from "./pages/SystemUpdate";
 import { TransactionDetail, TransactionForm, TransactionsList } from "./pages/Transactions";
 
@@ -65,6 +65,7 @@ export default function App() {
         <Route path="/settings/users/:id/edit/" element={<UserEditPage />} />
         <Route path="/settings/updates/" element={<SystemUpdatePage />} />
         <Route path="/settings/ai/" element={<AiAccessPage />} />
+        <Route path="/settings/imports/" element={<ImportSettingsPage />} />
         <Route path="/audit/" element={<AuditPage />} />
         <Route path="/founder-expenses/" element={<FounderExpensesPage />} />
         <Route path="*" element={<NotFound />} />

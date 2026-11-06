@@ -22,6 +22,7 @@ import ReceiptLongRounded from "@mui/icons-material/ReceiptLongRounded";
 import WalletRounded from "@mui/icons-material/WalletRounded";
 import PieChartRounded from "@mui/icons-material/PieChartRounded";
 import SettingsRounded from "@mui/icons-material/SettingsRounded";
+import SyncAltRounded from "@mui/icons-material/SyncAltRounded";
 import SystemUpdateAltRounded from "@mui/icons-material/SystemUpdateAltRounded";
 import { useTheme } from "@mui/material/styles";
 import { api } from "../api";
@@ -56,6 +57,7 @@ function navGroups(session) {
       { label: "Period locks", to: "/settings/periods/", Icon: LockRounded, show: admin },
       { label: "Users", to: "/settings/users/", Icon: GroupRounded, show: admin },
       { label: "AI access", to: "/settings/ai/", Icon: AutoAwesomeRounded },
+      { label: "Statement imports", to: "/settings/imports/", Icon: SyncAltRounded, show: admin },
       { label: "Software update", to: "/settings/updates/", Icon: SystemUpdateAltRounded, show: admin, badge: Boolean(session.update_available) },
     ] },
   ].map((group) => ({ ...group, items: group.items.filter((item) => item.show !== false) })).filter((group) => group.items.length);

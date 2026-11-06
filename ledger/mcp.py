@@ -45,6 +45,7 @@ from .models import (
     PartnershipSettings,
     Payment,
     ReservedInterestPeriod,
+    TransactionImportRef,
     UserProfile,
 )
 from .partnership import capital_account_rollforward, owner_interest_json, ownership_as_of, partner_allocation_report, reserved_interest_json
@@ -52,7 +53,7 @@ from .permissions import ROLE_LEVEL, user_role
 from .reporting import aging, balance_sheet, income_statement, owner_balances, trial_balance
 from .apps import PROCESS_STARTED_AT
 from .sync import is_synced_account, mark_synced, sync_status, synced_accounts
-from . import founder
+from . import founder, transfers
 from .services import (
     create_document,
     create_entry,
@@ -76,7 +77,7 @@ LiteBooks is a double-entry general ledger for one business. To import a bank or
 1. Call list_accounts. Find the account the statement belongs to (a bank, cash, or credit card account). If it does not exist, ask the user before creating it.
 2. Read the CSV and express every amount as signed from that account's point of view: negative for money out (purchases, charges, fees, withdrawals), positive for money in (deposits, refunds, payments received onto a card).
 3. Call categorization_history with the descriptions so you can book merchants the way they were booked before. Choose a category account for every row from list_accounts. Propose new accounts to the user instead of creating them silently.
-4. Call import_transactions with dry_run=true. Show the user the proposed categories and any errors or possible duplicates. Transfers between two of the business's own accounts appear on both statements, so book them only once.
+4. Call import_transactions with dry_run=true. Show the user the proposed categories and any errors or possible duplicates. Transfers between two of the business's own accounts appear on both statements, so book them only once: categorize a transfer row to the other bank, cash, or credit card account, and LiteBooks links it to the transaction already recording that transfer (status matched_transfer) instead of posting it again. For ambiguous_transfer rows, ask the user which candidate is the same money, then pass match_transaction_id (or force_new if none is) on that row. Treat a possible_transfer warning as a likely miscategorized transfer and ask the user. list_unlinked_transfers shows transfers whose other statement row has not been imported yet.
 5. Only after the user approves, call import_transactions again with the same rows and dry_run=false. Rows already imported are skipped, so re-running an overlapping statement is safe.
 
 For reporting and review, use the report tools (trial_balance, balance_sheet, income_statement, aging_report, owner_balances, general_ledger) rather than adding up search_transactions results yourself. get_transaction shows one entry in full, including its attachments and source document.
@@ -199,6 +200,7 @@ def entry_summary(entry):
         "source": entry.source,
         "contact": {"id": entry.contact_id, "name": entry.contact.name} if entry.contact else None,
         "import_ref": entry.import_ref,
+        "import_refs": transfers.entry_import_refs(entry),
         "lines": [{
             "account_id": line.account_id,
             "account": str(line.account),
@@ -210,7 +212,7 @@ def entry_summary(entry):
 
 
 def entries_queryset():
-    return JournalEntry.objects.select_related("contact").prefetch_related("lines__account")
+    return JournalEntry.objects.select_related("contact").prefetch_related("lines__account", "import_refs")
 
 
 def account_ref(account):
@@ -443,10 +445,12 @@ IMPORT_ROW = {
         "date": {"type": "string", "description": "YYYY-MM-DD"},
         "description": {"type": "string", "description": "The statement description as written. Without a reference, re-imports are matched on it, so do not reword it."},
         "amount": {"type": "string", "description": "Signed from the statement account's view: negative is money out or a charge, positive is money in."},
-        "category_account_id": {"type": "integer", "description": "The account on the other side, e.g. an expense or revenue account."},
+        "category_account_id": {"type": "integer", "description": "The account on the other side, e.g. an expense or revenue account. For a transfer between two of the business's own accounts, the other bank, cash, or credit card account."},
         "contact_id": {"type": "integer"},
         "memo": {"type": "string"},
         "reference": {"type": "string", "description": "The bank's own transaction id, if the CSV has one. Otherwise LiteBooks fingerprints the row."},
+        "match_transaction_id": {"type": "integer", "description": "Resolves an ambiguous_transfer: link the row to this existing transfer (one of its candidate_transaction_ids) instead of posting a new transaction."},
+        "force_new": {"type": "boolean", "description": "Resolves an ambiguous_transfer or a wrong match: post the row as a new transaction without looking for an existing transfer."},
     },
     "required": ["date", "description", "amount", "category_account_id"],
     "additionalProperties": False,
@@ -476,9 +480,26 @@ def possible_duplicates(statement_account, row, batch_refs):
     return [{"id": entry.pk, "number": entry.number, "description": entry.description, "import_ref": entry.import_ref} for entry in entries]
 
 
+def transfer_ref(entry):
+    return {"id": entry.pk, "number": entry.number, "date": entry.date.isoformat(), "description": entry.description}
+
+
+def chosen_transfer(pk, claimed):
+    try:
+        entry = JournalEntry.objects.prefetch_related("lines").get(pk=pk)
+    except (JournalEntry.DoesNotExist, ValueError, TypeError) as exc:
+        raise ToolError(f"match_transaction_id {pk!r} is not a transaction.") from exc
+    if entry.pk in claimed:
+        raise ToolError(f"match_transaction_id: another row in this batch is already linked to transaction #{entry.pk}.")
+    return entry
+
+
 @tool(
     "import_transactions",
-    "Book statement rows against one bank, cash, or credit card account, one transaction per row. Run with dry_run=true first and show the user the result; nothing is posted unless dry_run is false and every row is valid. Rows already imported are skipped.",
+    "Book statement rows against one bank, cash, or credit card account, one transaction per row. Run with dry_run=true first and show the user the result; nothing is posted unless dry_run is false and every row is valid. Rows already imported are skipped. "
+    "A row categorized to another bank, cash, or credit card account is a transfer: if exactly one existing transaction already records it (same two accounts, same amount to the cent, dated within the transfer match window, not yet linked to this statement, in an open month), the row comes back matched_transfer and is linked to that transaction instead of being posted again. "
+    "If several match, the row comes back ambiguous_transfer with candidate_transaction_ids and is not posted; import it again with match_transaction_id or force_new on that row. "
+    "Rows not categorized as transfers that look like one carry a possible_transfer warning.",
     {
         "statement_account_id": {"type": "integer", "description": "The bank, cash, or credit card account the statement belongs to."},
         "rows": {"type": "array", "items": IMPORT_ROW, "maxItems": MAX_IMPORT_ROWS},
@@ -498,10 +519,13 @@ def import_transactions(user, args):
     if len(raw_rows) > MAX_IMPORT_ROWS:
         raise ToolError(f"Send at most {MAX_IMPORT_ROWS} rows per call.")
     dry_run = args.get("dry_run", True) is not False
+    window_days = transfers.match_window_days()
 
     results = []
     seen_rows = {}
     seen_refs = set()
+    # Existing transfers linked to a row earlier in this batch, so two rows never claim one transfer.
+    claimed = set()
     with transaction.atomic():
         for index, raw in enumerate(raw_rows):
             result = {"row": index}
@@ -516,14 +540,51 @@ def import_transactions(user, args):
                 if ref in seen_refs:
                     raise ToolError("Another row in this batch has the same reference.")
                 seen_refs.add(ref)
-                existing = JournalEntry.objects.filter(import_ref=ref).first()
+                existing = transfers.entry_for_ref(ref)
                 if existing:
                     result.update(status="already_imported", entry={"id": existing.pk, "number": existing.number, "status": existing.status})
                     continue
+                # An unknown category is reported below, after the duplicate check, as it always was.
+                try:
+                    category = get_account(row["category_account_id"], "category_account_id")
+                except ToolError:
+                    category = None
+
+                matched = None
+                if row["match_transaction_id"] is not None:
+                    if category is None:
+                        get_account(row["category_account_id"], "category_account_id")
+                    matched = chosen_transfer(row["match_transaction_id"], claimed)
+                    problem = transfers.explain_mismatch(entry=matched, statement_account=statement_account, category=category, row=row, window_days=window_days)
+                    if problem:
+                        raise ToolError(f"match_transaction_id: {problem}")
+                elif category is not None and not row["force_new"] and transfers.is_cash_account(category) and category != statement_account:
+                    candidates = transfers.transfer_candidates(statement_account=statement_account, row=row, window_days=window_days, other_account=category, exclude_ids=claimed)
+                    if len(candidates) > 1:
+                        result.update(
+                            status="ambiguous_transfer",
+                            category=str(category),
+                            candidate_transaction_ids=[entry.pk for entry in candidates],
+                            candidates=[transfer_ref(entry) for entry in candidates],
+                        )
+                        continue
+                    matched = candidates[0] if candidates else None
+                if matched is not None:
+                    claimed.add(matched.pk)
+                    if not dry_run:
+                        transfers.link_import_ref(entry=matched, account=statement_account, ref=ref, user=user, row=row)
+                    result.update(status="matched_transfer", category=str(category), matched_transaction_id=matched.pk, entry=transfer_ref(matched))
+                    continue
+
+                warnings = []
+                if category is not None and not row["force_new"] and not transfers.is_cash_account(category):
+                    lookalikes = transfers.transfer_candidates(statement_account=statement_account, row=row, window_days=window_days, exclude_ids=claimed)
+                    warnings = [f"possible_transfer: matches transaction #{entry.pk}" for entry in lookalikes]
                 duplicates = possible_duplicates(statement_account, row, seen_refs)
                 if duplicates:
                     result["possible_duplicates"] = duplicates
-                category = get_account(row["category_account_id"], "category_account_id")
+                if category is None:
+                    category = get_account(row["category_account_id"], "category_account_id")
                 amount = abs(row["amount"])
                 statement_side = {"debit": amount, "credit": 0} if row["amount"] > 0 else {"debit": 0, "credit": amount}
                 category_side = {"debit": statement_side["credit"], "credit": statement_side["debit"]}
@@ -540,7 +601,10 @@ def import_transactions(user, args):
                             {"account": category, "owner": None, **category_side},
                         ],
                     )
+                    TransactionImportRef.objects.create(entry=entry, account=statement_account, import_ref=ref)
                 result.update(status="ready", category=str(category))
+                if warnings:
+                    result["warnings"] = warnings
                 if not dry_run:
                     result["entry"] = {"id": entry.pk, "number": entry.number}
             except (ToolError, ValidationError, ObjectDoesNotExist) as error:
@@ -550,6 +614,8 @@ def import_transactions(user, args):
         for result in results:
             counts[result["status"]] = counts.get(result["status"], 0) + 1
         counts["possible_duplicate"] = sum(1 for result in results if result.get("possible_duplicates"))
+        counts.setdefault("matched_transfer", 0)
+        counts.setdefault("ambiguous_transfer", 0)
         failed = counts.get("error", 0)
         if dry_run or failed:
             transaction.set_rollback(True)
@@ -564,9 +630,49 @@ def import_transactions(user, args):
                 result["status"] = "posted"
         counts["posted"] = counts.pop("ready", 0)
         outcome = f"Posted {counts['posted']} transaction(s)."
+        if counts["matched_transfer"]:
+            outcome += f" Linked {counts['matched_transfer']} row(s) to transfers already on the books."
+        if counts["ambiguous_transfer"]:
+            outcome += f" {counts['ambiguous_transfer']} row(s) match more than one existing transfer and were not posted: import them again with match_transaction_id or force_new."
         # The account is up to date through this statement even when every row was already booked.
         mark_synced(statement_account)
-    return {"outcome": outcome, "dry_run": dry_run, "statement_account": str(statement_account), "counts": counts, "rows": results}
+    return {"outcome": outcome, "dry_run": dry_run, "statement_account": str(statement_account), "transfer_match_window_days": window_days, "counts": counts, "rows": results}
+
+
+@tool(
+    "list_unlinked_transfers",
+    "List transfers between two bank, cash, or credit card accounts where at least one side has not been linked to a statement row yet. "
+    "Each unlinked side's statement row still needs importing (it will come back matched_transfer, categorized to the other account) or skipping. "
+    "statement_amount is what that row should show, signed from that account's view. Nothing is changed.",
+    {
+        "account_id": {"type": "integer", "description": "Only transfers touching this account."},
+        "start": {"type": "string", "description": "YYYY-MM-DD"},
+        "end": {"type": "string", "description": "YYYY-MM-DD"},
+    },
+    required=("start", "end"),
+)
+def list_unlinked_transfers(user, args):
+    start = parse_date(required(args, "start"), "start")
+    end = parse_date(required(args, "end"), "end")
+    if start > end:
+        raise ToolError("start must be on or before end.")
+    account = get_account(args["account_id"]) if args.get("account_id") is not None else None
+    items = []
+    for item in transfers.unlinked_transfers(start=start, end=end, account=account):
+        entry = item["entry"]
+        sides = [{"account": account_ref(side["account"]), "linked": side["linked"], "statement_amount": money(side["statement_amount"])} for side in item["sides"]]
+        items.append({
+            "transaction_id": entry.pk,
+            "number": entry.number,
+            "date": entry.date.isoformat(),
+            "description": entry.description,
+            "amount": money(sum((line.debit for line in entry.lines.all()), Decimal("0.00"))),
+            "accounts": [side["account"] for side in sides],
+            "sides": sides,
+            "unlinked_account_ids": [side["account"]["id"] for side in sides if not side["linked"]],
+            "period_closed": item["period_closed"],
+        })
+    return {"start": start.isoformat(), "end": end.isoformat(), "transfer_match_window_days": transfers.match_window_days(), "transfers": items}
 
 
 def clean_import_row(raw):
@@ -578,12 +684,22 @@ def clean_import_row(raw):
     amount = parse_amount(required(raw, "amount"))
     if not amount:
         raise ToolError("amount cannot be zero.")
+    match_id = raw.get("match_transaction_id")
+    if match_id is not None and (isinstance(match_id, bool) or not isinstance(match_id, int)):
+        raise ToolError(f"match_transaction_id must be a transaction id, not {match_id!r}.")
+    force_new = raw.get("force_new", False)
+    if not isinstance(force_new, bool):
+        raise ToolError("force_new must be true or false.")
+    if match_id is not None and force_new:
+        raise ToolError("Pass match_transaction_id or force_new, not both.")
     return {
         "date": parse_date(required(raw, "date")),
         "description": description[:240],
         "amount": amount,
         "category_account_id": required(raw, "category_account_id"),
         "memo": str(raw.get("memo") or "").strip(),
+        "match_transaction_id": match_id,
+        "force_new": force_new,
     }
 
 

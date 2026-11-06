@@ -223,6 +223,60 @@ class JournalEntry(TimeStampedModel):
         return (totals["debits"] or 0) == (totals["credits"] or 0) and (totals["debits"] or 0) > 0
 
 
+class TransactionImportRef(models.Model):
+    """One statement row booked by a transaction, per statement account.
+
+    JournalEntry.import_ref holds a single ref, but a transfer between two of
+    the business's own accounts appears on both statements, so it needs one
+    ref per side. Refs written since this table was added live here; older
+    ones are still only in JournalEntry.import_ref, and import deduplication
+    checks both.
+    """
+
+    entry = models.ForeignKey(JournalEntry, on_delete=models.CASCADE, related_name="import_refs", db_column="transaction_id")
+    account = models.ForeignKey(Account, on_delete=models.PROTECT, related_name="+")
+    import_ref = models.CharField(max_length=120)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "transaction_import_refs"
+        ordering = ["created_at", "pk"]
+        constraints = [
+            models.UniqueConstraint(fields=["account", "import_ref"], name="unique_import_ref_per_account"),
+            # A transaction books at most one row from each statement.
+            models.UniqueConstraint(fields=["entry", "account"], name="one_import_ref_per_entry_account"),
+        ]
+
+    def __str__(self):
+        return f"{self.import_ref} -> {self.entry_id}"
+
+
+class ImportSettings(models.Model):
+    """How statement imports behave. A singleton."""
+
+    transfer_match_window_days = models.PositiveSmallIntegerField(default=5)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+
+    MAX_WINDOW_DAYS = 31
+
+    class Meta:
+        verbose_name = "import settings"
+        verbose_name_plural = "import settings"
+
+    def __str__(self):
+        return "import settings"
+
+    @classmethod
+    def load(cls):
+        found, _ = cls.objects.get_or_create(pk=1)
+        return found
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+
 class EntryNumberSequence(models.Model):
     entry_date = models.DateField(unique=True)
     last_value = models.PositiveIntegerField(default=0)

@@ -32,6 +32,7 @@ urlpatterns = [
     path("ownership/reserved/", api.reserved_interests_api, name="api-reserved-interests"),
     path("ownership/reserved/<int:pk>/", api.reserved_interest_api, name="api-reserved-interest"),
     path("ownership/<str:kind>/<int:pk>/end/", api.interest_end_api, name="api-interest-end"),
+    path("imports/settings/", api.import_settings_api, name="api-import-settings"),
     path("partnership/settings/", api.partnership_settings_api, name="api-partnership-settings"),
     path("founder-expenses/", api.founder_expenses_api, name="api-founder-expenses"),
     path("founder-expenses/summary/", api.founder_expense_summary_api, name="api-founder-expense-summary"),

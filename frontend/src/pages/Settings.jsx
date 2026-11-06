@@ -213,3 +213,32 @@ export function AiAccessPage() {
     </Page>
   );
 }
+
+export function ImportSettingsPage() {
+  const { session, notify } = useApp();
+  const canEdit = session.permissions.administer;
+  const detail = useApiData("/api/imports/settings/", []);
+  const [days, setDays] = useState("");
+  const [errors, setErrors] = useState({});
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { if (detail.data?.settings) setDays(String(detail.data.settings.transfer_match_window_days)); }, [detail.data]);
+  if (detail.loading) return <PageLoading title="Statement imports" />;
+  if (detail.error) return <Page title="Statement imports"><ErrorState error={detail.error} /></Page>;
+  const max = detail.data.settings.max_window_days;
+  const submit = async (event) => {
+    event.preventDefault();
+    setSaving(true); setErrors({});
+    try { await api("/api/imports/settings/", { method: "POST", body: { transfer_match_window_days: days } }); notify("Import settings saved."); await detail.reload(); } catch (failure) { setErrors({ ...(failure.fields || {}), __all__: failure.message }); } finally { setSaving(false); }
+  };
+  return (
+    <Page title="Statement imports" eyebrow="Company settings" subtitle="How imported bank, cash, and credit card statement rows are matched to transactions already on the books." crumbs={[{ label: "Settings" }, { label: "Statement imports" }]}>
+      <Paper component="form" onSubmit={submit} variant="outlined" sx={{ p: { xs: 2, sm: 3 }, maxWidth: 680 }}>
+        {errors.__all__ && <Alert severity="error" sx={{ mb: 2 }}>{errors.__all__}</Alert>}
+        <Typography variant="h2" sx={{ mb: 1 }}>Transfer matching</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>A transfer between two of the business's own accounts, such as paying the credit card from checking, appears on both statements. When the second statement is imported, its row is linked to the transfer already booked instead of being posted twice. The amounts must match to the cent, and the dates may differ by up to this many days to allow for ACH settlement.</Typography>
+        <TextField required type="number" label="Match window (days)" value={days} onChange={(event) => setDays(event.target.value)} disabled={!canEdit} slotProps={{ htmlInput: { min: 0, max, step: 1 } }} error={Boolean(fieldError(errors, "transfer_match_window_days"))} helperText={fieldError(errors, "transfer_match_window_days") || `0 to ${max} days. A row dated exactly this many days away still matches.`} sx={{ width: 260 }} />
+        {canEdit && <Stack direction="row" sx={{ justifyContent: "flex-end", mt: 3 }}><Button type="submit" variant="contained" disabled={saving}>Save settings</Button></Stack>}
+      </Paper>
+    </Page>
+  );
+}
