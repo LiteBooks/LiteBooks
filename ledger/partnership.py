@@ -336,6 +336,52 @@ def ownership_regimes(owner_periods, reserved_periods):
     return regimes
 
 
+def describe_span(first, last):
+    days = (last - first).days + 1
+    when = f"on {first.isoformat()}" if first == last else f"for {first.isoformat()} to {last.isoformat()}"
+    return f"{when} ({days} day{'' if days == 1 else 's'})"
+
+
+def coverage_warnings(start, end, owner_periods, reserved_periods):
+    """Warnings for days in start..end whose recorded interests do not add up cleanly.
+
+    Judged from the stated periods on file, day by day, before any convention moves a
+    change: days with no issued interest (their income goes unallocated), days where
+    issued plus reserved is over 100%, and days where it is under 100%. These warn even
+    when the days carry no income, so a gap in the records is visible before income lands in it.
+    """
+    regimes = ownership_regimes(owner_periods, reserved_periods)
+    spans = []  # [kind, total, first, last], adjacent days of the same kind and total merged
+    for index, (first, state) in enumerate(regimes):
+        last = regimes[index + 1][0] - ONE_DAY if index + 1 < len(regimes) else date.max
+        first, last = max(first, start), min(last, end)
+        if first > last:
+            continue
+        total = state.issued + state.reserved
+        if not state.has_owners:
+            kind, total = "uncovered", None
+        elif total > HUNDRED:
+            kind = "over"
+        elif total < HUNDRED:
+            kind = "under"
+        else:
+            continue
+        if spans and spans[-1][0] == kind and spans[-1][1] == total and spans[-1][3] + ONE_DAY == first:
+            spans[-1][3] = last
+        else:
+            spans.append([kind, total, first, last])
+    warnings = []
+    for kind, total, first, last in spans:
+        span = describe_span(first, last)
+        if kind == "uncovered":
+            warnings.append(f"No ownership interests on file {span}; income for these days is unallocated.")
+        elif kind == "over":
+            warnings.append(f"Issued and reserved interests total {total:.4f}% {span}, which is over 100%; check the ownership periods on file for these dates. Income is allocated by each owner's share of issued interests.")
+        else:
+            warnings.append(f"Issued and reserved interests total {total:.4f}% {span}, leaving {HUNDRED - total:.4f}% unaccounted for; income for these days is shared by the issued owners in proportion to their holdings.")
+    return warnings
+
+
 def first_of_next_month(day):
     return date(day.year + 1, 1, 1) if day.month == 12 else date(day.year, day.month + 1, 1)
 
@@ -515,7 +561,7 @@ def compute_allocation(start, end, method=None, convention=None, change_day_belo
         for owner_id, cents in segment.allocations.items():
             totals[owner_id] += cents
 
-    warnings = []
+    warnings = coverage_warnings(start, end, owner_periods, reserved_periods)
     if unallocated:
         warnings.append(f"{money(from_cents(unallocated))} of net income falls on days with no recorded owner interests and is not allocated to anyone.")
     if method == PartnershipSettings.Method.PRORATION and convention != PartnershipSettings.Convention.CALENDAR_DAY:
