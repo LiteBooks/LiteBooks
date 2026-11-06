@@ -22,6 +22,7 @@ from .permissions import ROLE_LEVEL, user_role
 from .reporting import account_rows, aging, balance_sheet, income_statement, owner_balances, trial_balance
 from .services import can_delete_entry, can_edit_document, create_document, create_entry, create_owner_activity, create_payment, delete_entry, record_audit, restore_entry, update_document, update_entry, update_owner_activity
 from . import updates
+from .sync import is_synced_account, record_statement_balance, sync_status
 
 
 def money(value):
@@ -450,7 +451,10 @@ def account_api(request, pk):
             movement = line.debit - line.credit
             running += movement if account.normal_balance == "debit" else -movement
             ledger.append({"id": line.pk, "date": line.entry.date.isoformat(), "entry": {"id": line.entry_id, "number": line.entry.number}, "description": line.description or line.entry.description, "debit": money(line.debit), "credit": money(line.credit), "balance": money(running)})
-        return JsonResponse({"account": account_json(account, running), "ledger": ledger})
+        payload = {"account": account_json(account, running), "ledger": ledger}
+        if is_synced_account(account):
+            payload["sync"] = sync_status(account)
+        return JsonResponse(payload)
     if ROLE_LEVEL[user_role(request.user)] < ROLE_LEVEL[UserProfile.Role.ADMIN]:
         return JsonResponse({"error": "Administrator access is required."}, status=403)
     before = account_json(account)
@@ -460,6 +464,20 @@ def account_api(request, pk):
     account = form.save()
     record_audit(request.user, "updated", account, before=before, after=account_json(account))
     return JsonResponse({"account": account_json(account)})
+
+
+@api_view(methods=("POST",), minimum_role=UserProfile.Role.BOOKKEEPER)
+def account_statement_api(request, pk):
+    account = get_object_or_404(Account, pk=pk)
+    data = request_data(request)
+    statement = record_statement_balance(
+        account=account,
+        statement_end_date=date_value(data.get("statement_end_date"), "statement_end_date"),
+        statement_ending_balance=decimal_value(data.get("statement_ending_balance"), "statement_ending_balance"),
+        user=request.user,
+    )
+    record_audit(request.user, "created", statement, after={"account": account.code, "statement_end_date": statement.statement_end_date.isoformat(), "statement_ending_balance": money(statement.statement_ending_balance)})
+    return JsonResponse({"sync": sync_status(account)}, status=201)
 
 
 @api_view(methods=("GET", "POST"))

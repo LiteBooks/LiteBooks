@@ -10,7 +10,13 @@ from .models import Account, BusinessDocument, JournalLine
 ZERO = Value(Decimal("0.00"), output_field=DecimalField(max_digits=15, decimal_places=2))
 
 
-def account_rows(*, start=None, end=None, account_type=None):
+def account_rows(*, start=None, end=None, account_type=None, sign_by_type=False):
+    """Per-account debits, credits, and balance.
+
+    balance is signed toward the account's own normal side, unless sign_by_type
+    is set: then it is signed toward its type's normal side, so contra accounts
+    such as owner draws come out negative and a section can simply be summed.
+    """
     line_filter = Q(journal_lines__entry__status="posted")
     if start:
         line_filter &= Q(journal_lines__entry__date__gte=start)
@@ -26,7 +32,8 @@ def account_rows(*, start=None, end=None, account_type=None):
     rows = []
     for account in accounts:
         raw = account.debits - account.credits
-        balance = raw if account.normal_balance == "debit" else -raw
+        side = Account.type_normal_balance(account.type) if sign_by_type else account.normal_balance
+        balance = raw if side == "debit" else -raw
         rows.append({"account": account, "debits": account.debits, "credits": account.credits, "balance": balance})
     return rows
 
@@ -49,7 +56,8 @@ def balance_sheet(as_of=None):
     as_of = as_of or date.today()
     groups = {}
     for account_type in [Account.Type.ASSET, Account.Type.LIABILITY, Account.Type.EQUITY]:
-        rows = [row for row in account_rows(end=as_of, account_type=account_type) if row["balance"]]
+        # Draws are shown as a reduction of equity, as on a conventional balance sheet.
+        rows = [row for row in account_rows(end=as_of, account_type=account_type, sign_by_type=True) if row["balance"]]
         groups[account_type] = {"rows": rows, "total": sum((row["balance"] for row in rows), Decimal("0.00"))}
     revenue = sum((row["balance"] for row in account_rows(end=as_of, account_type=Account.Type.REVENUE)), Decimal("0.00"))
     expense = sum((row["balance"] for row in account_rows(end=as_of, account_type=Account.Type.EXPENSE)), Decimal("0.00"))

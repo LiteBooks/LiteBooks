@@ -108,7 +108,14 @@ class Account(TimeStampedModel):
 
     @property
     def normal_balance(self):
-        return "debit" if self.type in {self.Type.ASSET, self.Type.EXPENSE} else "credit"
+        # Draws are contra-equity: they reduce equity, so they carry a debit balance.
+        if self.subtype == self.Subtype.OWNER_DRAW:
+            return "debit"
+        return self.type_normal_balance(self.type)
+
+    @classmethod
+    def type_normal_balance(cls, account_type):
+        return "debit" if account_type in {cls.Type.ASSET, cls.Type.EXPENSE} else "credit"
 
 
 class Contact(TimeStampedModel):
@@ -553,3 +560,33 @@ class PartnershipSettings(models.Model):
     def save(self, *args, **kwargs):
         self.pk = 1
         super().save(*args, **kwargs)
+
+
+class AccountSyncState(models.Model):
+    """When a bank or card account's activity was last brought up to date.
+
+    Set whenever an import completes, even one that adds no new rows, so "no
+    new activity" can be told apart from "not synced".
+    """
+
+    account = models.OneToOneField(Account, on_delete=models.CASCADE, related_name="sync_state")
+    last_synced_at = models.DateTimeField()
+
+    def __str__(self):
+        return f"{self.account} synced {self.last_synced_at:%Y-%m-%d %H:%M}"
+
+
+class StatementBalance(models.Model):
+    """An ending balance from a bank or card statement, entered to check the books against."""
+
+    account = models.ForeignKey(Account, on_delete=models.CASCADE, related_name="statement_balances")
+    statement_end_date = models.DateField()
+    statement_ending_balance = models.DecimalField(max_digits=15, decimal_places=2)
+    entered_at = models.DateTimeField(auto_now_add=True)
+    entered_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+
+    class Meta:
+        ordering = ["-statement_end_date", "-entered_at", "-pk"]
+
+    def __str__(self):
+        return f"{self.account} statement {self.statement_end_date}"

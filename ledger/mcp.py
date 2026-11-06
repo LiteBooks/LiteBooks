@@ -50,6 +50,8 @@ from .models import (
 from .partnership import capital_account_rollforward, owner_interest_json, ownership_as_of, partner_allocation_report, reserved_interest_json
 from .permissions import ROLE_LEVEL, user_role
 from .reporting import aging, balance_sheet, income_statement, owner_balances, trial_balance
+from .apps import PROCESS_STARTED_AT
+from .sync import is_synced_account, mark_synced, sync_status, synced_accounts
 from .services import (
     create_document,
     create_entry,
@@ -85,6 +87,8 @@ Invoices (money owed to the business) and bills (money it owes) are documents: c
 Money moving between an owner and the business (equity contributions, draws, loans to the business, and loan repayments) is recorded with record_owner_activity, which tags the owner so owner_balances stays right.
 
 For partnership tax work, ownership percentages over time come from list_owner_interests and ownership_as_of. partner_allocation_report splits income among owners when ownership changes mid-year, and capital_account_rollforward builds each owner's capital account. Ownership is entered in the web app only, and allocations are reports: they are never posted to the ledger.
+
+Before relying on totals, call account_sync_status to see when each bank and card account was last synced and how its book balance compares with the latest statement, and say how current the books are. server_info reports which LiteBooks build you are connected to and which tools it offers.
 
 Amounts are decimal strings with two places. Dates are ISO 8601 (YYYY-MM-DD). Months that are closed in LiteBooks reject postings; call list_periods to see which are closed. To trace who changed a record and when, use search_audit_log.
 """
@@ -557,6 +561,8 @@ def import_transactions(user, args):
                 result["status"] = "posted"
         counts["posted"] = counts.pop("ready", 0)
         outcome = f"Posted {counts['posted']} transaction(s)."
+        # The account is up to date through this statement even when every row was already booked.
+        mark_synced(statement_account)
     return {"outcome": outcome, "dry_run": dry_run, "statement_account": str(statement_account), "counts": counts, "rows": results}
 
 
@@ -1461,6 +1467,44 @@ def capital_account_rollforward_tool(user, args):
             raise ToolError(f"owner_id {owner.pk} is a {owner.kind}, not an owner. Call list_contacts with kind=owner.")
         owner_id = owner.pk
     return capital_account_rollforward(start, end, owner_id=owner_id)
+
+
+# -- Server identity and data freshness ------------------------------------------
+#
+# Read only. server_info lets an assistant confirm which build it is talking to;
+# account_sync_status tells it how current and how accurate the books are.
+
+
+@tool(
+    "server_info",
+    "Which LiteBooks build this connection is talking to: app version, git commit, build time, when this server process started, the tools available to your token, and feature flags. Compare git_commit with the expected release to confirm an update is live.",
+    {},
+)
+def server_info(user, args):
+    return {
+        "app_version": settings.LITEBOOKS_VERSION,
+        "git_commit": settings.LITEBOOKS_GIT_SHA,
+        "build_time": settings.LITEBOOKS_BUILD_TIME,
+        "mcp_server_started_at": PROCESS_STARTED_AT.isoformat(),
+        "tools": [item.name for item in allowed_tools(user)],
+        "feature_flags": {"in_app_updates": settings.LITEBOOKS_UPDATES_ENABLED, "tools_list_changed_notifications": False},
+    }
+
+
+@tool(
+    "account_sync_status",
+    "How current and how accurate each bank and credit card account is: last_synced_at (when an import last completed, even one with no new rows; null if never), the latest posted transaction date, the book balance, the latest statement balance entered in the web app, the book balance on that statement's end date, and difference_vs_statement (book minus statement; null when no statement has been entered). Balances are signed toward the account's normal side, so a card balance is the amount owed. Check this before relying on totals.",
+    {"account_id": {"type": "integer", "description": "Only this bank or credit card account."}},
+)
+def account_sync_status(user, args):
+    if args.get("account_id") is not None:
+        account = get_account(args["account_id"])
+        if not is_synced_account(account):
+            raise ToolError(f"{account} is not a bank or credit card account. Call list_accounts and pick one with subtype bank or credit_card.")
+        accounts = [account]
+    else:
+        accounts = synced_accounts()
+    return {"accounts": [sync_status(account) for account in accounts]}
 
 
 # -- Transport ----------------------------------------------------------------

@@ -42,7 +42,10 @@ export function AccountDetail() {
   const account = data.account;
   return (
     <Page title={account.name} eyebrow={`${account.code} · ${account.type_label}`} subtitle={account.description} crumbs={[{ label: "Accounts", to: "/accounts/" }, { label: account.name }]} actions={<>{session.permissions.edit_books && <><Button component={RouterLink} to={`/transactions/new/?account=${account.id}&side=credit`} variant="outlined">Credit</Button><Button component={RouterLink} to={`/transactions/new/?account=${account.id}&side=debit`} variant="contained">Debit</Button></>}{session.permissions.administer && <Button component={RouterLink} to={`/accounts/${account.id}/edit/`} color="inherit" startIcon={<EditRounded />}>Edit</Button>}</>}>
-      <Card sx={{ width: { xs: "100%", sm: 360 }, mb: 3, borderLeft: 4, borderLeftColor: "primary.main" }}><CardContent><Typography variant="overline" color="text.secondary">Current balance</Typography><Typography sx={{ fontSize: 28, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{formatMoney(account.balance)}</Typography><Typography variant="caption" color="text.secondary">{account.normal_balance} normal balance</Typography></CardContent></Card>
+      <Stack direction={{ xs: "column", md: "row" }} spacing={3} alignItems={{ md: "flex-start" }} sx={{ mb: 3 }}>
+        <Card sx={{ width: { xs: "100%", sm: 360 }, flexShrink: 0, borderLeft: 4, borderLeftColor: "primary.main" }}><CardContent><Typography variant="overline" color="text.secondary">Current balance</Typography><Typography sx={{ fontSize: 28, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{formatMoney(account.balance)}</Typography><Typography variant="caption" color="text.secondary">{account.normal_balance} normal balance</Typography></CardContent></Card>
+        {data.sync && <SyncPanel key={account.id} accountId={account.id} isCard={account.subtype === "credit_card"} initial={data.sync} canEdit={session.permissions.edit_books} />}
+      </Stack>
       <Typography variant="h2" sx={{ mb: 1.5 }}>Account ledger</Typography>
       <DataTable rows={data.ledger} emptyTitle="No posted activity" columns={[
         { key: "date", label: "Date", render: (row) => formatDate(row.date) },
@@ -53,6 +56,44 @@ export function AccountDetail() {
         { key: "balance", label: "Balance", align: "right", render: (row) => <Typography fontWeight={600}>{formatMoney(row.balance)}</Typography> },
       ]} />
     </Page>
+  );
+}
+
+function formatDateTime(value) {
+  return value ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value)) : "Never";
+}
+
+function SyncPanel({ accountId, isCard, initial, canEdit }) {
+  const { notify } = useApp();
+  const [sync, setSync] = useState(initial);
+  const [values, setValues] = useState({ statement_end_date: "", statement_ending_balance: "" });
+  const [errors, setErrors] = useState({});
+  const [saving, setSaving] = useState(false);
+  const statement = sync.latest_statement;
+  const difference = sync.difference_vs_statement;
+  const submit = async (event) => {
+    event.preventDefault(); setSaving(true); setErrors({});
+    try { const response = await api(`/api/accounts/${accountId}/statements/`, { method: "POST", body: values }); setSync(response.sync); setValues({ statement_end_date: "", statement_ending_balance: "" }); notify("Statement balance saved."); }
+    catch (error) { setErrors({ ...(error.fields || {}), __all__: error.message }); }
+    finally { setSaving(false); }
+  };
+  return (
+    <Card variant="outlined" sx={{ flex: 1, minWidth: 0 }}><CardContent>
+      <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "repeat(3, 1fr)" }, gap: 2, mb: canEdit ? 2 : 0 }}>
+        <Box><Typography variant="overline" color="text.secondary">Last synced</Typography><Typography fontWeight={600}>{formatDateTime(sync.last_synced_at)}</Typography><Typography variant="caption" color="text.secondary">Latest transaction {formatDate(sync.last_transaction_date)}</Typography></Box>
+        <Box><Typography variant="overline" color="text.secondary">Latest statement</Typography>{statement ? <><Typography fontWeight={600} sx={{ fontVariantNumeric: "tabular-nums" }}>{formatMoney(statement.statement_ending_balance)}</Typography><Typography variant="caption" color="text.secondary">Ending {formatDate(statement.statement_end_date)}</Typography></> : <Typography color="text.secondary">None entered</Typography>}</Box>
+        <Box><Typography variant="overline" color="text.secondary">Book vs. statement</Typography>{statement ? <><Typography fontWeight={600} color={Number(difference) === 0 ? "success.main" : "warning.main"} sx={{ fontVariantNumeric: "tabular-nums" }}>{Number(difference) === 0 ? "Matches" : formatMoney(difference)}</Typography><Typography variant="caption" color="text.secondary">Books show {formatMoney(sync.book_balance_at_statement_date)} on that date</Typography></> : <Typography color="text.secondary">—</Typography>}</Box>
+      </Box>
+      {canEdit && <Box component="form" onSubmit={submit}>
+        {errors.__all__ && <Alert severity="error" sx={{ mb: 2 }}>{errors.__all__}</Alert>}
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Enter statement balance</Typography>
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ sm: "flex-start" }}>
+          <TextField required size="small" type="date" label="Statement end date" InputLabelProps={{ shrink: true }} value={values.statement_end_date} onChange={(event) => setValues({ ...values, statement_end_date: event.target.value })} error={Boolean(fieldError(errors, "statement_end_date"))} helperText={fieldError(errors, "statement_end_date")} />
+          <TextField required size="small" label={isCard ? "Ending balance owed" : "Ending balance"} inputProps={{ inputMode: "decimal" }} value={values.statement_ending_balance} onChange={(event) => setValues({ ...values, statement_ending_balance: event.target.value })} error={Boolean(fieldError(errors, "statement_ending_balance"))} helperText={fieldError(errors, "statement_ending_balance")} />
+          <Button type="submit" variant="outlined" disabled={saving}>{saving ? "Saving…" : "Save"}</Button>
+        </Stack>
+      </Box>}
+    </CardContent></Card>
   );
 }
 

@@ -22,6 +22,11 @@ jobs:
           python-version: "3.13"
           cache: pip
       - run: pip install -r requirements.txt
+      - name: Every implemented MCP tool is offered by tools/list
+        run: python manage.py check_mcp_tools
+        env:
+          DJANGO_SECRET_KEY: test-only-key
+          DJANGO_DEBUG: "true"
       - run: python manage.py test
         env:
           DJANGO_SECRET_KEY: test-only-key

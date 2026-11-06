@@ -15,6 +15,7 @@ urlpatterns = [
     path("transactions/<int:pk>/restore/", api.transaction_restore_api, name="api-transaction-restore"),
     path("accounts/", api.accounts_api, name="api-accounts"),
     path("accounts/<int:pk>/", api.account_api, name="api-account"),
+    path("accounts/<int:pk>/statements/", api.account_statement_api, name="api-account-statements"),
     path("contacts/", api.contacts_api, name="api-contacts"),
     path("contacts/<int:pk>/", api.contact_api, name="api-contact"),
     path("documents/", api.documents_api, name="api-documents"),
