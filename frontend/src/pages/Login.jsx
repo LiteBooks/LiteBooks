@@ -16,7 +16,7 @@ export default function LoginPage() {
   return (
     <Box sx={{ minHeight: "100vh", display: "grid", placeItems: "center", p: 2, bgcolor: "#EDF1EF" }}>
       <Paper component="form" onSubmit={submit} variant="outlined" sx={{ width: "100%", maxWidth: 410, p: { xs: 3, sm: 4 } }}>
-        <Stack direction="row" alignItems="center" spacing={1.5}><Avatar variant="rounded" sx={{ bgcolor: "secondary.main", fontWeight: 900 }}>LB</Avatar><Box><Typography variant="h1" sx={{ fontSize: 24 }}>LiteBooks</Typography><Typography color="text.secondary" variant="body2">Business books, kept close.</Typography></Box></Stack>
+        <Stack sx={{ alignItems: "center" }} direction="row" spacing={1.5}><Avatar variant="rounded" sx={{ bgcolor: "secondary.main", fontWeight: 900 }}>LB</Avatar><Box><Typography variant="h1" sx={{ fontSize: 24 }}>LiteBooks</Typography><Typography color="text.secondary" variant="body2">Business books, kept close.</Typography></Box></Stack>
         {error && <Alert severity="error" sx={{ mt: 3 }}>{error}</Alert>}
         <Stack spacing={2} sx={{ mt: 3 }}><TextField required autoFocus autoComplete="username" label="Username" value={values.username} onChange={(event) => setValues({ ...values, username: event.target.value })} /><TextField required type="password" autoComplete="current-password" label="Password" value={values.password} onChange={(event) => setValues({ ...values, password: event.target.value })} /><Button type="submit" variant="contained" size="large" disabled={saving} startIcon={saving ? <CircularProgress color="inherit" size={16} /> : <LockRounded />}>Sign in</Button></Stack>
       </Paper>

@@ -180,7 +180,7 @@ export default function SystemUpdatePage() {
 
           {active && (
             <Paper variant="outlined" sx={{ p: 2.5, borderColor: "primary.main" }}>
-              <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 1.5 }}>
+              <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", mb: 1.5 }}>
                 <CircularProgress size={20} />
                 <Typography variant="h2" sx={{ m: 0 }}>
                   {restarting ? "Restarting LiteBooks…" : STEP_LABELS[run.step] || "Updating"}
@@ -199,7 +199,7 @@ export default function SystemUpdatePage() {
 
           {failed && (
             <Paper variant="outlined" sx={{ p: 2.5, borderColor: "error.main" }}>
-              <Stack direction="row" spacing={1.25} alignItems="center" sx={{ mb: 1 }}>
+              <Stack direction="row" spacing={1.25} sx={{ alignItems: "center", mb: 1 }}>
                 <ErrorOutlineRounded color="error" />
                 <Typography variant="h2" sx={{ m: 0 }}>Update failed</Typography>
                 <Chip size="small" color="error" variant="outlined" label={STEP_LABELS[run.step] || run.step} />
@@ -227,7 +227,7 @@ export default function SystemUpdatePage() {
 
           {!active && state.update_available && (
             <Paper variant="outlined" sx={{ p: 2.5, borderColor: "primary.main" }}>
-              <Stack direction="row" spacing={1.25} alignItems="center" sx={{ mb: 1 }}>
+              <Stack direction="row" spacing={1.25} sx={{ alignItems: "center", mb: 1 }}>
                 <SystemUpdateAltRounded color="primary" />
                 <Typography variant="h2" sx={{ m: 0 }}>Update available</Typography>
                 <Chip size="small" color="primary" variant="outlined" label={`${state.commits_behind} commit${state.commits_behind === 1 ? "" : "s"} behind`} />
@@ -248,7 +248,7 @@ export default function SystemUpdatePage() {
 
           {!active && !state.update_available && state.enabled && (
             <Paper variant="outlined" sx={{ p: 2.5 }}>
-              <Stack direction="row" spacing={1.25} alignItems="center">
+              <Stack sx={{ alignItems: "center" }} direction="row" spacing={1.25}>
                 <CheckCircleRounded color="success" />
                 <Typography variant="h2" sx={{ m: 0 }}>LiteBooks is up to date</Typography>
               </Stack>

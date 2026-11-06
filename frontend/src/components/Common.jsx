@@ -75,7 +75,7 @@ export function ErrorState({ error }) {
 
 export function EmptyState({ title = "Nothing here yet", detail, action }) {
   return (
-    <Stack alignItems="center" spacing={0.5} sx={{ py: 5, px: 2, textAlign: "center" }}>
+    <Stack spacing={0.5} sx={{ alignItems: "center", py: 5, px: 2, textAlign: "center" }}>
       <Typography color="text.secondary" variant="body2">{title}</Typography>
       {detail && <Typography color="text.secondary" variant="caption">{detail}</Typography>}
       {action}
@@ -89,7 +89,7 @@ export function Page({ title, eyebrow, subtitle, crumbs = [], actions, children 
   useEffect(() => { document.title = `${title} · LiteBooks`; }, [title]);
   return (
     <Box>
-      <Stack direction="row" alignItems="center" sx={{ minHeight: 28, mb: 1.5 }}>
+      <Stack direction="row" sx={{ alignItems: "center", minHeight: 28, mb: 1.5 }}>
         <Breadcrumbs
           separator={<ChevronRightRounded sx={{ fontSize: 16 }} />}
           aria-label="Breadcrumb"
@@ -110,7 +110,7 @@ export function Page({ title, eyebrow, subtitle, crumbs = [], actions, children 
           <Typography variant="h1" sx={{ overflowWrap: "anywhere" }}>{title}</Typography>
           {subtitle && <Typography color="text.secondary" sx={{ mt: 0.5 }}>{subtitle}</Typography>}
         </Box>
-        {actions && <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap" sx={{ alignItems: "center", alignSelf: { xs: "stretch", sm: "auto" }, justifyContent: { xs: "flex-end", sm: "initial" }, ml: { sm: "auto" }, flexShrink: 0 }}>{actions}</Stack>}
+        {actions && <Stack direction="row" spacing={0.75} useFlexGap sx={{ flexWrap: "wrap", alignItems: "center", alignSelf: { xs: "stretch", sm: "auto" }, justifyContent: { xs: "flex-end", sm: "initial" }, ml: { sm: "auto" }, flexShrink: 0 }}>{actions}</Stack>}
       </Stack>
       {children}
     </Box>
@@ -135,7 +135,7 @@ export function SubmitButton({ saving, children = "Save", ...props }) {
 }
 
 export function FormActions({ saving, submitLabel = "Save", cancelTo, onCancel }) {
-  return <Stack direction="row" spacing={1} justifyContent="flex-end" sx={{ mt: 3 }}><Button component={cancelTo ? RouterLink : "button"} to={cancelTo} onClick={onCancel} color="inherit">Cancel</Button><SubmitButton saving={saving}>{submitLabel}</SubmitButton></Stack>;
+  return <Stack direction="row" spacing={1} sx={{ justifyContent: "flex-end", mt: 3 }}><Button component={cancelTo ? RouterLink : "button"} to={cancelTo} onClick={onCancel} color="inherit">Cancel</Button><SubmitButton saving={saving}>{submitLabel}</SubmitButton></Stack>;
 }
 
 export function PageLoading({ title = "Loading" }) {

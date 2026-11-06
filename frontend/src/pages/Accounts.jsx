@@ -22,12 +22,12 @@ export function AccountsList() {
     <Page title="Accounts" eyebrow="Chart of accounts" crumbs={[{ label: "Accounts" }]} actions={session.permissions.administer && <Button component={RouterLink} to="/accounts/new/" variant="contained" startIcon={<AddRounded />}>New account</Button>}>
       {loading ? <LoadingState /> : error ? <ErrorState error={error} /> : <DataTable rows={data.accounts} emptyTitle="No accounts yet" columns={[
         { key: "code", label: "Code" },
-        { key: "name", label: "Name", sx: { minWidth: 180 }, render: (row) => <Link component={RouterLink} to={`/accounts/${row.id}/`} fontWeight={700}>{row.name}</Link> },
+        { key: "name", label: "Name", sx: { minWidth: 180 }, render: (row) => <Link sx={{ fontWeight: 700 }} component={RouterLink} to={`/accounts/${row.id}/`}>{row.name}</Link> },
         { key: "description", label: "Description", sx: { minWidth: 220 }, render: (row) => row.description || "—" },
         { key: "type", label: "Type", render: (row) => row.type_label },
         { key: "subtype", label: "Subtype", render: (row) => row.subtype_label || "—" },
         { key: "status", label: "Status", render: (row) => <Chip size="small" color={row.is_active ? "success" : "default"} variant="outlined" label={row.is_active ? "Active" : "Inactive"} /> },
-        { key: "balance", label: "Balance", align: "right", render: (row) => <Typography fontWeight={600} sx={{ fontVariantNumeric: "tabular-nums" }}>{formatMoney(row.balance)}</Typography> },
+        { key: "balance", label: "Balance", align: "right", render: (row) => <Typography sx={{ fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{formatMoney(row.balance)}</Typography> },
       ]} />}
     </Page>
   );
@@ -53,7 +53,7 @@ export function AccountDetail() {
         { key: "description", label: "Description", sx: { minWidth: 220 } },
         { key: "debit", label: "Debit", align: "right", render: (row) => Number(row.debit) ? formatMoney(row.debit) : "—" },
         { key: "credit", label: "Credit", align: "right", render: (row) => Number(row.credit) ? formatMoney(row.credit) : "—" },
-        { key: "balance", label: "Balance", align: "right", render: (row) => <Typography fontWeight={600}>{formatMoney(row.balance)}</Typography> },
+        { key: "balance", label: "Balance", align: "right", render: (row) => <Typography sx={{ fontWeight: 600 }}>{formatMoney(row.balance)}</Typography> },
       ]} />
     </Page>
   );
@@ -88,8 +88,8 @@ function SyncPanel({ accountId, isCard, initial, canEdit }) {
         {errors.__all__ && <Alert severity="error" sx={{ mb: 2 }}>{errors.__all__}</Alert>}
         <Typography variant="subtitle2" sx={{ mb: 1 }}>Enter statement balance</Typography>
         <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ alignItems: { sm: "flex-start" } }}>
-          <TextField required size="small" type="date" label="Statement end date" InputLabelProps={{ shrink: true }} value={values.statement_end_date} onChange={(event) => setValues({ ...values, statement_end_date: event.target.value })} error={Boolean(fieldError(errors, "statement_end_date"))} helperText={fieldError(errors, "statement_end_date")} />
-          <TextField required size="small" label={isCard ? "Ending balance owed" : "Ending balance"} inputProps={{ inputMode: "decimal" }} value={values.statement_ending_balance} onChange={(event) => setValues({ ...values, statement_ending_balance: event.target.value })} error={Boolean(fieldError(errors, "statement_ending_balance"))} helperText={fieldError(errors, "statement_ending_balance")} />
+          <TextField required size="small" type="date" label="Statement end date" slotProps={{ inputLabel: { shrink: true } }} value={values.statement_end_date} onChange={(event) => setValues({ ...values, statement_end_date: event.target.value })} error={Boolean(fieldError(errors, "statement_end_date"))} helperText={fieldError(errors, "statement_end_date")} />
+          <TextField required size="small" label={isCard ? "Ending balance owed" : "Ending balance"} slotProps={{ htmlInput: { inputMode: "decimal" } }} value={values.statement_ending_balance} onChange={(event) => setValues({ ...values, statement_ending_balance: event.target.value })} error={Boolean(fieldError(errors, "statement_ending_balance"))} helperText={fieldError(errors, "statement_ending_balance")} />
           <Button type="submit" variant="outlined" disabled={saving}>{saving ? "Saving…" : "Save"}</Button>
         </Stack>
       </Box>}

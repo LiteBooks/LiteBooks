@@ -32,7 +32,7 @@ export function PeriodsPage() {
         <Button type="submit" variant="outlined" disabled={saving} startIcon={<AddRounded />}>Add period</Button>
       </Paper>
       {loading ? <LoadingState /> : error ? <ErrorState error={error} /> : <DataTable rows={data.periods} emptyTitle="No explicit periods yet" emptyDetail="Months remain open until a period is added and closed." columns={[
-        { key: "label", label: "Period", render: (row) => <Typography fontWeight={700}>{row.label}</Typography> },
+        { key: "label", label: "Period", render: (row) => <Typography sx={{ fontWeight: 700 }}>{row.label}</Typography> },
         { key: "status", label: "Status", render: (row) => <Chip size="small" color={row.is_closed ? "error" : "success"} variant="outlined" icon={row.is_closed ? <LockRounded /> : <LockOpenRounded />} label={row.is_closed ? "Closed" : "Open"} /> },
         { key: "closed_by", label: "Changed by", render: (row) => row.closed_by || "—" },
         { key: "closed_at", label: "Changed at", render: (row) => row.closed_at ? formatDate(row.closed_at) : "—" },
@@ -58,9 +58,9 @@ export function UsersPage() {
     <Page title="Users" eyebrow="Access control" crumbs={[{ label: "Settings" }, { label: "Users" }]}>
       <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", xl: "minmax(0, 1.5fr) 380px" }, gap: 3, alignItems: "start" }}>
         <Box>{loading ? <LoadingState /> : error ? <ErrorState error={error} /> : <DataTable rows={data.users} columns={[
-          { key: "username", label: "Username", render: (row) => <Typography fontWeight={700}>{row.username}</Typography> }, { key: "name", label: "Name", render: (row) => row.name || "—" },
+          { key: "username", label: "Username", render: (row) => <Typography sx={{ fontWeight: 700 }}>{row.username}</Typography> }, { key: "name", label: "Name", render: (row) => row.name || "—" },
           { key: "role", label: "Role", render: (row) => <Chip size="small" label={row.role_label} variant="outlined" /> }, { key: "status", label: "Status", render: (row) => row.is_active ? "Active" : "Inactive" },
-          { key: "actions", label: "", align: "right", render: (row) => <Stack direction="row" spacing={1} justifyContent="flex-end"><Button component={RouterLink} to={`/settings/users/${row.id}/edit/`} size="small" startIcon={<EditRounded />}>Edit</Button><Button size="small" color="error" startIcon={<DeleteOutlineRounded />} disabled={row.id === session?.user?.id} onClick={() => setConfirm(row)}>Delete</Button></Stack> },
+          { key: "actions", label: "", align: "right", render: (row) => <Stack sx={{ justifyContent: "flex-end" }} direction="row" spacing={1}><Button component={RouterLink} to={`/settings/users/${row.id}/edit/`} size="small" startIcon={<EditRounded />}>Edit</Button><Button size="small" color="error" startIcon={<DeleteOutlineRounded />} disabled={row.id === session?.user?.id} onClick={() => setConfirm(row)}>Delete</Button></Stack> },
         ]} />}</Box>
         <Paper component="form" onSubmit={submit} variant="outlined" sx={{ p: 2.5 }}><Typography variant="h2" sx={{ mb: 2 }}>New user</Typography>{errors.__all__ && <Alert severity="error" sx={{ mb: 2 }}>{errors.__all__}</Alert>}<Stack spacing={2}><TextField required label="Username" value={values.username} onChange={set("username")} error={Boolean(fieldError(errors, "username"))} helperText={fieldError(errors, "username")} /><TextField label="First name" value={values.first_name} onChange={set("first_name")} /><TextField label="Last name" value={values.last_name} onChange={set("last_name")} /><TextField required select label="Role" value={values.role} onChange={set("role")}>{options?.choices.roles.map((item) => <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>)}</TextField><TextField required type="password" label="Temporary password" value={values.password} onChange={set("password")} error={Boolean(fieldError(errors, "password"))} helperText={fieldError(errors, "password") || "At least 8 characters"} /><FormControlLabel control={<Switch checked={values.is_active} onChange={(event) => setValues({ ...values, is_active: event.target.checked })} />} label="Active login" /><Button type="submit" variant="contained" disabled={saving}>Create user</Button></Stack></Paper>
       </Box>
@@ -157,7 +157,7 @@ function Snippet({ label, value }) {
   const copy = async () => { try { await navigator.clipboard.writeText(value); notify(`${label} copied.`); } catch { notify("Copy failed. Select the text and copy it instead.", "error"); } };
   return (
     <Box>
-      <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 0.5 }}><Typography variant="body2" fontWeight={700}>{label}</Typography><Button size="small" startIcon={<ContentCopyRounded />} onClick={copy}>Copy</Button></Stack>
+      <Stack direction="row" sx={{ alignItems: "center", justifyContent: "space-between", mb: 0.5 }}><Typography sx={{ fontWeight: 700 }} variant="body2">{label}</Typography><Button size="small" startIcon={<ContentCopyRounded />} onClick={copy}>Copy</Button></Stack>
       <Box component="pre" sx={{ m: 0, p: 1.5, borderRadius: 1, bgcolor: "grey.100", fontSize: 12.5, overflowX: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{value}</Box>
     </Box>
   );
@@ -192,8 +192,8 @@ export function AiAccessPage() {
             </Paper>
           )}
           {loading ? <LoadingState /> : error ? <ErrorState error={error} /> : <DataTable rows={data.tokens} emptyTitle="No tokens yet" emptyDetail="Create a token for each assistant you connect, so you can revoke one without affecting the others." columns={[
-            { key: "name", label: "Name", render: (row) => <Typography fontWeight={700}>{row.name}</Typography> },
-            { key: "hint", label: "Token", render: (row) => <Typography variant="body2" fontFamily="monospace">…{row.hint}</Typography> },
+            { key: "name", label: "Name", render: (row) => <Typography sx={{ fontWeight: 700 }}>{row.name}</Typography> },
+            { key: "hint", label: "Token", render: (row) => <Typography sx={{ fontFamily: "monospace" }} variant="body2">…{row.hint}</Typography> },
             { key: "created_at", label: "Created", render: (row) => formatDate(row.created_at) },
             { key: "last_used_at", label: "Last used", render: (row) => row.last_used_at ? formatDate(row.last_used_at) : "Never" },
             { key: "actions", label: "", align: "right", render: (row) => <Button size="small" color="error" startIcon={<DeleteOutlineRounded />} onClick={() => setConfirm(row)}>Revoke</Button> },

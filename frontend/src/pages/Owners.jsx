@@ -16,10 +16,10 @@ export function OwnersList() {
     <Page title="Owner balances" eyebrow="Equity and liabilities" crumbs={[{ label: "Owners" }]} actions={session.permissions.edit_books && <><Button component={RouterLink} to="/contacts/new/?kind=owner" variant="outlined" startIcon={<PersonAddRounded />}>New owner</Button><Button component={RouterLink} to="/owners/activity/new/" variant="contained" startIcon={<AddRounded />}>New owner activity</Button></>}>
       {loading ? <LoadingState /> : error ? <ErrorState error={error} /> : <>
         <DataTable rows={data.owners} getKey={(row) => row.owner.id} emptyTitle="No owners yet" emptyDetail="Add an owner, then post owner activity to begin." columns={[
-          { key: "owner", label: "Owner", render: (row) => session.permissions.edit_books ? <Link component={RouterLink} to={`/contacts/${row.owner.id}/edit/`} fontWeight={700}>{row.owner.name}</Link> : <Typography fontWeight={700}>{row.owner.name}</Typography> },
+          { key: "owner", label: "Owner", render: (row) => session.permissions.edit_books ? <Link sx={{ fontWeight: 700 }} component={RouterLink} to={`/contacts/${row.owner.id}/edit/`}>{row.owner.name}</Link> : <Typography sx={{ fontWeight: 700 }}>{row.owner.name}</Typography> },
           { key: "contributions", label: "Contributions", align: "right", render: (row) => formatMoney(row.contributions) },
           { key: "draws", label: "Draws", align: "right", render: (row) => formatMoney(row.draws) },
-          { key: "owed", label: "Amount owed to owner", align: "right", render: (row) => <Typography fontWeight={700}>{formatMoney(row.owed)}</Typography> },
+          { key: "owed", label: "Amount owed to owner", align: "right", render: (row) => <Typography sx={{ fontWeight: 700 }}>{formatMoney(row.owed)}</Typography> },
         ]} />
         <Typography variant="h2" sx={{ mt: 4, mb: 1.5 }}>Recent activity</Typography>
         <DataTable rows={data.activities} emptyTitle="No owner activity yet" columns={[

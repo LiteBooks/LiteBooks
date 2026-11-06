@@ -70,7 +70,7 @@ function EntryDialog({ entry, owners, categories, onClose, onSaved }) {
           <TextField select required size="small" label="Owner who paid" value={values.owner_id} onChange={set("owner_id")} {...field("owner_id")}>{owners.map((owner) => <MenuItem key={owner.id} value={owner.id}>{owner.name}</MenuItem>)}</TextField>
           <DateField required label="Date paid" value={values.date_paid} onChange={(value) => setValues({ ...values, date_paid: value })} disableFuture {...field("date_paid")} />
           <TextField required size="small" label="Vendor" value={values.vendor} onChange={set("vendor")} {...field("vendor")} />
-          <TextField required size="small" label="Amount" inputProps={{ inputMode: "decimal" }} value={values.amount} onChange={set("amount")} {...field("amount")} />
+          <TextField required size="small" label="Amount" slotProps={{ htmlInput: { inputMode: "decimal" } }} value={values.amount} onChange={set("amount")} {...field("amount")} />
           <TextField required size="small" label="Description" value={values.description} onChange={set("description")} sx={{ gridColumn: { sm: "1 / -1" } }} {...field("description")} />
           <TextField required multiline minRows={2} size="small" label="Business purpose" value={values.business_purpose} onChange={set("business_purpose")} sx={{ gridColumn: { sm: "1 / -1" } }} {...field("business_purpose")} />
           <TextField select size="small" label="Category (label only)" value={values.category} onChange={set("category")} {...field("category")}><MenuItem value="">Uncategorized</MenuItem>{categories.map((account) => <MenuItem key={account.code} value={account.code}>{account.code} · {account.name}</MenuItem>)}</TextField>

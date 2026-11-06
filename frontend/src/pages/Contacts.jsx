@@ -17,7 +17,7 @@ export function ContactsList() {
     <Page title="Contacts" eyebrow="Customers, vendors, and owners" crumbs={[{ label: "Contacts" }]} actions={session.permissions.edit_books && <Button component={RouterLink} to="/contacts/new/" variant="contained" startIcon={<AddRounded />}>New contact</Button>}>
       <Box sx={{ width: { xs: "100%", sm: 280 }, mb: 2 }}><TextField select label="Contact type" value={kind} onChange={(event) => setKind(event.target.value)}><MenuItem value="">All contact types</MenuItem>{options?.choices.contact_kinds.map((item) => <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>)}</TextField></Box>
       {loading ? <LoadingState /> : error ? <ErrorState error={error} /> : <DataTable rows={data.contacts} emptyTitle="No contacts yet" columns={[
-        { key: "name", label: "Name", sx: { minWidth: 180 }, render: (row) => <Typography fontWeight={700}>{row.name}</Typography> },
+        { key: "name", label: "Name", sx: { minWidth: 180 }, render: (row) => <Typography sx={{ fontWeight: 700 }}>{row.name}</Typography> },
         { key: "kind", label: "Type", render: (row) => <Chip size="small" label={row.kind_label} variant="outlined" /> },
         { key: "email", label: "Email", render: (row) => row.email || "—" },
         { key: "phone", label: "Phone", render: (row) => row.phone || "—" },

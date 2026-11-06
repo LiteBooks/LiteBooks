@@ -17,13 +17,13 @@ export default function Dashboard() {
             ["Payables", data.metrics.payables, "Open vendor bills"], ["Year-to-date net income", data.metrics.net_income, "Revenue less expenses"],
           ].map(([label, value, caption]) => <Card key={label}><CardContent><Typography variant="overline" color="text.secondary">{label}</Typography><Typography sx={{ fontSize: 25, fontWeight: 700, fontVariantNumeric: "tabular-nums", color: Number(value) < 0 ? "error.main" : "text.primary" }}>{formatMoney(value)}</Typography><Typography variant="caption" color="text.secondary">{caption}</Typography></CardContent></Card>)}
         </Box>
-        <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mt: 4, mb: 1.5 }}><Typography variant="h2">Recent transactions</Typography><Button component={RouterLink} to="/transactions/" endIcon={<ArrowForwardRounded />}>View all</Button></Stack>
+        <Stack direction="row" sx={{ alignItems: "center", justifyContent: "space-between", mt: 4, mb: 1.5 }}><Typography variant="h2">Recent transactions</Typography><Button component={RouterLink} to="/transactions/" endIcon={<ArrowForwardRounded />}>View all</Button></Stack>
         <DataTable rows={data.recent_entries} emptyTitle="No transactions yet" columns={[
           { key: "date", label: "Date", render: (row) => formatDate(row.date) },
-          { key: "number", label: "Entry", render: (row) => <Link component={RouterLink} to={`/transactions/${row.id}/`} fontWeight={700}>{row.number}</Link> },
+          { key: "number", label: "Entry", render: (row) => <Link sx={{ fontWeight: 700 }} component={RouterLink} to={`/transactions/${row.id}/`}>{row.number}</Link> },
           { key: "description", label: "Description", sx: { minWidth: 220 } },
           { key: "source", label: "Source", render: (row) => <Chip size="small" label={row.source_label} variant="outlined" /> },
-          { key: "total", label: "Amount", align: "right", render: (row) => <Typography fontWeight={600} sx={{ fontVariantNumeric: "tabular-nums" }}>{formatMoney(row.total)}</Typography> },
+          { key: "total", label: "Amount", align: "right", render: (row) => <Typography sx={{ fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{formatMoney(row.total)}</Typography> },
         ]} />
       </>}
     </Page>

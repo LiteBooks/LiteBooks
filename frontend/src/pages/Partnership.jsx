@@ -59,14 +59,14 @@ function InterestTable({ kind, ownerId, title, detail }) {
   };
 
   const columns = [
-    ...(kind === "reserved" ? [{ key: "label", label: "Interest", render: (row) => <Typography fontWeight={700}>{row.label}</Typography> }] : []),
-    { key: "percentage", label: "Percentage", align: "right", render: (row) => <Typography fontWeight={kind === "owner" ? 700 : 400}>{formatPct(row.percentage)}</Typography> },
+    ...(kind === "reserved" ? [{ key: "label", label: "Interest", render: (row) => <Typography sx={{ fontWeight: 700 }}>{row.label}</Typography> }] : []),
+    { key: "percentage", label: "Percentage", align: "right", render: (row) => <Typography sx={{ fontWeight: kind === "owner" ? 700 : 400 }}>{formatPct(row.percentage)}</Typography> },
     { key: "effective_start", label: "From", render: (row) => formatDate(row.effective_start) },
     { key: "effective_end", label: "Through", render: (row) => row.effective_end ? formatDate(row.effective_end) : "Open" },
     { key: "source_document", label: "Source", render: (row) => row.source_document || "—" },
     { key: "notes", label: "Notes", sx: { maxWidth: 260 }, render: (row) => row.notes || "—" },
     ...(canEdit ? [{ key: "actions", label: "", align: "right", render: (row) => (
-      <Stack direction="row" spacing={0.5} justifyContent="flex-end">
+      <Stack sx={{ justifyContent: "flex-end" }} direction="row" spacing={0.5}>
         <Button size="small" startIcon={<EditRounded />} onClick={() => open(row)}>Edit</Button>
         {!row.effective_end && <Button size="small" startIcon={<EventBusyRounded />} onClick={() => { setErrors({}); setEndDate(""); setEnding(row); }}>End</Button>}
         <Button size="small" color="error" startIcon={<DeleteOutlineRounded />} onClick={() => setRemoving(row)}>Delete</Button>
@@ -76,9 +76,9 @@ function InterestTable({ kind, ownerId, title, detail }) {
 
   return (
     <Box>
-      <Stack direction="row" alignItems="flex-end" justifyContent="space-between" spacing={2} sx={{ mb: 1.5 }}>
+      <Stack direction="row" spacing={2} sx={{ alignItems: "flex-end", justifyContent: "space-between", mb: 1.5 }}>
         <Box><Typography variant="h2">{title}</Typography>{detail && <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>{detail}</Typography>}</Box>
-        {canEdit && <Button variant="outlined" startIcon={<AddRounded />} onClick={() => open(null)}>Add period</Button>}
+        {canEdit && <Button variant="outlined" startIcon={<AddRounded />} onClick={() => open(null)} sx={{ flexShrink: 0, whiteSpace: "nowrap" }}>Add period</Button>}
       </Stack>
       {loading ? <LoadingState rows={2} /> : error ? <ErrorState error={error} /> : <DataTable rows={data.periods} columns={columns} emptyTitle="No ownership recorded" emptyDetail={kind === "owner" ? "Add the percentage this owner holds and the date it took effect." : "Add unissued interests, such as an option pool, that belong to no owner."} />}
 
@@ -89,7 +89,7 @@ function InterestTable({ kind, ownerId, title, detail }) {
             {errors.__all__ && <Alert severity="error" sx={{ mb: 2 }}>{errors.__all__}</Alert>}
             <Stack spacing={2} sx={{ pt: 1 }}>
               {kind === "reserved" && <TextField required label="Name" placeholder="Reserved pool" value={values.label} onChange={set("label")} error={Boolean(fieldError(errors, "label"))} helperText={fieldError(errors, "label")} />}
-              <TextField required label="Percentage" value={values.percentage} onChange={set("percentage")} inputProps={{ inputMode: "decimal" }} error={Boolean(fieldError(errors, "percentage"))} helperText={fieldError(errors, "percentage") || "0 to 100, up to four decimal places"} />
+              <TextField required label="Percentage" value={values.percentage} onChange={set("percentage")} slotProps={{ htmlInput: { inputMode: "decimal" } }} error={Boolean(fieldError(errors, "percentage"))} helperText={fieldError(errors, "percentage") || "0 to 100, up to four decimal places"} />
               <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 2 }}>
                 <DateField required label="Effective from" value={values.effective_start} onChange={(value) => setValues({ ...values, effective_start: value })} error={Boolean(fieldError(errors, "effective_start"))} helperText={fieldError(errors, "effective_start")} />
                 <DateField label="Effective through" value={values.effective_end} onChange={(value) => setValues({ ...values, effective_end: value })} error={Boolean(fieldError(errors, "effective_end"))} helperText={fieldError(errors, "effective_end") || "Leave empty while still held"} />
@@ -171,7 +171,7 @@ export function PartnershipSettingsPage() {
           <DateField label="Statement date" value={values.written_statement_date} onChange={(value) => setValues({ ...values, written_statement_date: value })} disabled={!canEdit} error={Boolean(fieldError(errors, "written_statement_date"))} helperText={fieldError(errors, "written_statement_date")} />
           <TextField multiline minRows={3} label="Statement" value={values.written_statement} onChange={set("written_statement")} disabled={!canEdit} />
         </Box>
-        {canEdit && <Stack direction="row" justifyContent="flex-end" sx={{ mt: 3 }}><SubmitButton saving={saving}>Save settings</SubmitButton></Stack>}
+        {canEdit && <Stack direction="row" sx={{ justifyContent: "flex-end", mt: 3 }}><SubmitButton saving={saving}>Save settings</SubmitButton></Stack>}
       </Paper>
       <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 }, mt: 3, maxWidth: 1100 }}>
         <InterestTable kind="reserved" title="Reserved interests" detail="Authorized interests that belong to no owner, such as an option pool. Issued and reserved interests may not exceed 100% on any day." />
@@ -195,7 +195,7 @@ export function PartnerAllocationBody({ data }) {
       </Typography>
       {data.segments.map((segment) => (
         <Box key={segment.start} sx={{ mb: 3 }}>
-          <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" sx={{ pb: 1, mb: 1, borderBottom: 2, borderColor: "text.secondary" }}>
+          <Stack direction={{ xs: "column", sm: "row" }} sx={{ justifyContent: "space-between", pb: 1, mb: 1, borderBottom: 2, borderColor: "text.secondary" }}>
             <Typography variant="h2">{formatDate(segment.start)} – {formatDate(segment.end)} <Typography component="span" color="text.secondary">({segment.days} days)</Typography></Typography>
             <Typography variant="h2">{data.method === "proration" ? `${formatMoney(segment.allocated_income)} allocated · ${formatMoney(segment.net_income)} booked` : formatMoney(segment.net_income)}</Typography>
           </Stack>
@@ -205,7 +205,7 @@ export function PartnerAllocationBody({ data }) {
             { key: "effective_pct", label: "Effective", align: "right", render: (row) => formatPct(row.effective_pct) },
             { key: "amount", label: "Allocated", align: "right", render: (row) => formatMoney(row.amount) },
           ]} />
-          {segment.by_account.length > 0 && <Box sx={{ mt: 1, px: 1 }}>{segment.by_account.map((row) => <Stack key={row.account_id} direction="row" justifyContent="space-between"><Typography variant="body2" color="text.secondary">{row.code} {row.name}</Typography><Typography variant="body2" color="text.secondary">{formatMoney(row.net_income_effect)}</Typography></Stack>)}</Box>}
+          {segment.by_account.length > 0 && <Box sx={{ mt: 1, px: 1 }}>{segment.by_account.map((row) => <Stack sx={{ justifyContent: "space-between" }} key={row.account_id} direction="row"><Typography variant="body2" color="text.secondary">{row.code} {row.name}</Typography><Typography variant="body2" color="text.secondary">{formatMoney(row.net_income_effect)}</Typography></Stack>)}</Box>}
         </Box>
       ))}
       <Typography variant="h2" sx={{ pb: 1, borderBottom: 2, borderColor: "text.secondary" }}>Totals by owner</Typography>
@@ -227,13 +227,13 @@ export function CapitalRollforwardBody({ data }) {
       <Warnings warnings={data.warnings} />
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Allocated income uses the {labels[data.method]?.toLowerCase()} method and {labels[data.convention]?.toLowerCase()} convention. The beginning balance includes income allocated in earlier years. Other movements are capital moved between owners and owner-tagged entries to other equity accounts.</Typography>
       <DataTable rows={data.owners} getKey={(row) => row.owner_id} emptyTitle="No owner capital in this period" columns={[
-        { key: "owner_name", label: "Owner", render: (row) => <Typography fontWeight={700}>{row.owner_name}</Typography> },
+        { key: "owner_name", label: "Owner", render: (row) => <Typography sx={{ fontWeight: 700 }}>{row.owner_name}</Typography> },
         { ...money("beginning"), label: "Beginning" },
         { ...money("contributions"), label: "Contributions" },
         { ...money("draws"), label: "Draws" },
         { ...money("allocated_income_loss"), label: "Allocated income (loss)" },
         { ...money("other"), label: "Other" },
-        { ...money("ending"), label: "Ending", render: (row) => <Typography fontWeight={700}>{formatMoney(row.ending)}</Typography> },
+        { ...money("ending"), label: "Ending", render: (row) => <Typography sx={{ fontWeight: 700 }}>{formatMoney(row.ending)}</Typography> },
       ]} />
     </Box>
   );

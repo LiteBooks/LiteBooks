@@ -19,13 +19,13 @@ export function DocumentsList() {
     <Page title="Invoices & bills" eyebrow="Accounts receivable and payable" crumbs={[{ label: "Invoices & bills" }]} actions={session.permissions.edit_books && <><Button component={RouterLink} to="/documents/new/bill/" variant="outlined" startIcon={<AddRounded />}>New bill</Button><Button component={RouterLink} to="/documents/new/invoice/" variant="contained" startIcon={<AddRounded />}>New invoice</Button></>}>
       <Tabs value={kind} onChange={(_, value) => navigate(`/documents/?kind=${value}`)} sx={{ mb: 2, borderBottom: 1, borderColor: "divider" }}><Tab value="invoice" label="Invoices" /><Tab value="bill" label="Bills" /></Tabs>
       {loading ? <LoadingState /> : error ? <ErrorState error={error} /> : <DataTable rows={data.documents} emptyTitle={`No ${kind === "invoice" ? "invoices" : "bills"} yet`} columns={[
-        { key: "number", label: "Number", sx: { minWidth: 170 }, render: (row) => <Box><Link component={RouterLink} to={`/documents/${row.id}/`} fontWeight={700}>{row.number}</Link><Typography display="block" variant="caption" color="text.secondary">{row.description}</Typography></Box> },
+        { key: "number", label: "Number", sx: { minWidth: 170 }, render: (row) => <Box><Link sx={{ fontWeight: 700 }} component={RouterLink} to={`/documents/${row.id}/`}>{row.number}</Link><Typography sx={{ display: "block" }} variant="caption" color="text.secondary">{row.description}</Typography></Box> },
         { key: "contact", label: "Contact", render: (row) => row.contact.name },
         { key: "issue_date", label: "Issued", render: (row) => formatDate(row.issue_date) },
         { key: "due_date", label: "Due", render: (row) => formatDate(row.due_date) },
         { key: "status", label: "Status", render: (row) => <Chip size="small" label={row.status_label} color={row.status === "paid" ? "success" : row.status === "partial" ? "warning" : "default"} variant={row.status === "open" ? "outlined" : "filled"} /> },
         { key: "amount", label: "Total", align: "right", render: (row) => formatMoney(row.amount) },
-        { key: "balance_due", label: "Balance", align: "right", render: (row) => <Typography fontWeight={700}>{formatMoney(row.balance_due)}</Typography> },
+        { key: "balance_due", label: "Balance", align: "right", render: (row) => <Typography sx={{ fontWeight: 700 }}>{formatMoney(row.balance_due)}</Typography> },
       ]} />}
     </Page>
   );
@@ -54,7 +54,7 @@ export function DocumentDetail() {
         { key: "date", label: "Date", render: (row) => formatDate(row.date) },
         { key: "journal_entry", label: "Entry", render: (row) => <Link component={RouterLink} to={`/transactions/${row.journal_entry.id}/`}>{row.journal_entry.number}</Link> },
         { key: "cash_account", label: "Bank or cash account", render: (row) => row.cash_account.display_name },
-        { key: "amount", label: "Amount", align: "right", render: (row) => <Typography fontWeight={700}>{formatMoney(row.amount)}</Typography> },
+        { key: "amount", label: "Amount", align: "right", render: (row) => <Typography sx={{ fontWeight: 700 }}>{formatMoney(row.amount)}</Typography> },
       ]} />
     </Page>
   );
