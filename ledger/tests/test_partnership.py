@@ -17,8 +17,11 @@ from ledger.partnership import (
     delete_interest,
     end_interest,
     largest_remainder,
+    load_periods,
     ownership_as_of,
+    ownership_on,
     partner_allocation_report,
+    pct,
     save_owner_interest,
     save_reserved_interest,
     save_settings,
@@ -235,13 +238,16 @@ class SegmentTests(PartnershipTestCase):
         return segments[1].start.isoformat()
 
     def test_conventions_place_changes_on_the_1st_15th_16th_and_last_day(self):
+        # Keyed by the new percentages' effective_start; the variation date is the day before
+        # (the outgoing interest's last day), and conventions are applied to the variation date.
         expected = {
-            # change date: (calendar day outgoing, calendar day incoming, semi-monthly, monthly)
-            "2026-05-01": ("2026-05-02", "2026-05-01", "2026-05-01", "2026-05-01"),
-            "2026-05-15": ("2026-05-16", "2026-05-15", "2026-05-01", "2026-05-01"),
-            "2026-05-16": ("2026-05-17", "2026-05-16", "2026-05-16", "2026-06-01"),
-            "2026-05-31": ("2026-06-01", "2026-05-31", "2026-05-16", "2026-06-01"),
-            "2026-02-28": ("2026-03-01", "2026-02-28", "2026-02-16", "2026-03-01"),
+            # effective_start: (calendar day outgoing, calendar day incoming, semi-monthly, monthly)
+            "2026-05-01": ("2026-05-01", "2026-04-30", "2026-04-16", "2026-05-01"),  # variation 04-30
+            "2026-05-15": ("2026-05-15", "2026-05-14", "2026-05-01", "2026-05-01"),  # variation 05-14
+            "2026-05-16": ("2026-05-16", "2026-05-15", "2026-05-01", "2026-05-01"),  # variation 05-15
+            "2026-05-17": ("2026-05-17", "2026-05-16", "2026-05-16", "2026-06-01"),  # variation 05-16
+            "2026-05-31": ("2026-05-31", "2026-05-30", "2026-05-16", "2026-06-01"),  # variation 05-30
+            "2026-02-28": ("2026-02-28", "2026-02-27", "2026-02-16", "2026-03-01"),  # variation 02-27
         }
         for day, (outgoing, incoming, semi, monthly) in expected.items():
             with self.subTest(day=day):
@@ -262,17 +268,20 @@ class SegmentTests(PartnershipTestCase):
         self.assertEqual(self.bounds(report), [("2026-01-01", "2026-12-31")])
         self.assertEqual({row["name"]: row["stated_pct"] for row in report["segments"][0]["allocations"]}, {"Alice": "100.0000"})
 
-    def test_activity_on_the_change_day_follows_change_day_belongs_to(self):
-        self.change_on("2026-07-01")
-        self.sale("2026-07-01", "100.00")
+    def test_activity_on_the_variation_date_follows_change_day_belongs_to(self):
+        self.change_on("2026-07-01")  # Alice's 100% ends 06-30, the variation date
+        self.sale("2026-06-30", "100.00")
+        self.sale("2026-07-01", "10.00")
         outgoing = partner_allocation_report(D("2026-01-01"), D("2026-12-31"), change_day_belongs_to="outgoing")
+        self.assertEqual(self.bounds(outgoing), [("2026-01-01", "2026-06-30"), ("2026-07-01", "2026-12-31")])
         self.assertEqual(self.amounts(outgoing["segments"][0]), {"Alice": "100.00", "Bob": "0.00"})
-        self.assertEqual(outgoing["segments"][1]["net_income"], "0.00")
+        self.assertEqual(self.amounts(outgoing["segments"][1]), {"Alice": "5.00", "Bob": "5.00"})
         save_settings(user=self.user, change_day_belongs_to="incoming")
         incoming = partner_allocation_report(D("2026-01-01"), D("2026-12-31"))
         self.assertEqual(incoming["change_day_belongs_to"], "incoming")
+        self.assertEqual(self.bounds(incoming), [("2026-01-01", "2026-06-29"), ("2026-06-30", "2026-12-31")])
         self.assertEqual(incoming["segments"][0]["net_income"], "0.00")
-        self.assertEqual(self.amounts(incoming["segments"][1]), {"Alice": "50.00", "Bob": "50.00"})
+        self.assertEqual(self.amounts(incoming["segments"][1]), {"Alice": "55.00", "Bob": "55.00"})
 
     def test_changes_collapsed_by_a_convention_keep_the_latest_ownership(self):
         self.interest(self.alice, "2026-01-01", "100", end="2026-05-02")
@@ -283,6 +292,8 @@ class SegmentTests(PartnershipTestCase):
         report = partner_allocation_report(D("2026-01-01"), D("2026-12-31"), convention="semi_monthly")
         self.assertEqual(self.bounds(report), [("2026-01-01", "2026-04-30"), ("2026-05-01", "2026-12-31")])
         self.assertEqual({row["name"]: row["stated_pct"] for row in report["segments"][1]["allocations"]}, {"Alice": "50.0000", "Bob": "50.0000"})
+        # Both variations (05-02 and 05-09) were folded onto the 05-01 deemed start.
+        self.assertEqual(report["segments"][1]["change_dates"], ["2026-05-02", "2026-05-09"])
 
     def test_first_ownership_starts_on_its_own_date(self):
         self.interest(self.alice, "2026-03-16", "100")
@@ -372,7 +383,7 @@ class AllocationTests(PartnershipTestCase):
     def test_proration_spreads_income_over_days(self):
         self.change_on_july_1()
         self.sale("2026-01-10", "365.00")
-        report = partner_allocation_report(D("2026-01-01"), D("2026-12-31"), method="proration", change_day_belongs_to="incoming")
+        report = partner_allocation_report(D("2026-01-01"), D("2026-12-31"), method="proration")
         first, second = report["segments"]
         self.assertEqual((first["days"], second["days"]), (181, 184))
         self.assertEqual((first["allocated_income"], second["allocated_income"]), ("181.00", "184.00"))
@@ -583,7 +594,7 @@ class ApiTests(PartnershipTestCase):
         self.assertEqual(export["Content-Type"], "text/csv")
         rows = list(csv.reader(io.StringIO(export.content.decode())))
         self.assertEqual(rows[0][:3], ["Segment start", "Segment end", "Days"])
-        self.assertIn(["2026-08-16", "2026-12-31", "138", "-600.00", "-600.00", "Carol", str(self.carol.pk), "0.0000", "0.0000", "0.00"], rows)
+        self.assertIn(["2026-08-15", "2026-12-31", "139", "-600.00", "-600.00", "Carol", str(self.carol.pk), "0.0000", "0.0000", "0.00"], rows)
         export = self.client.get(reverse("api-report-csv", args=["capital-rollforward"]), {"start": "2026-03-01", "end": "2026-12-31"})
         self.assertIn("Alice", export.content.decode())
         self.assertEqual(self.client.get(reverse("api-report-csv", args=["trial-balance"])).status_code, 404)
@@ -660,3 +671,239 @@ class PageRouteTests(PartnershipTestCase):
     def test_the_partnership_settings_page_is_served(self):
         self.client.force_login(self.user)
         self.assertEqual(self.client.get("/settings/partnership/").status_code, 200)
+
+
+class VariationDateTests(PartnershipTestCase):
+    """Segment boundaries sit at the end of the variation date: the last day of the outgoing interest."""
+
+    YEAR = (D("2025-01-01"), D("2025-12-31"))
+
+    def sample_2025(self):
+        """A, B, C 30% each Jan 1 - Jun 30 with 10% reserved; from Jul 1 A and B 45% each, C nothing."""
+        for owner in [self.alice, self.bob, self.carol]:
+            self.interest(owner, "2025-01-01", "30", end="2025-06-30")
+        self.reserved("2025-01-01", "10")
+        self.interest(self.alice, "2025-07-01", "45")
+        self.interest(self.bob, "2025-07-01", "45")
+
+    def report(self, start=None, end=None, **options):
+        return partner_allocation_report(start or self.YEAR[0], end or self.YEAR[1], **options)
+
+    def ownership_by_day(self, start, end, convention="calendar_day", belongs_to="outgoing"):
+        days = {}
+        for segment in segments_for(start, end, convention, belongs_to):
+            day = segment.start
+            while day <= segment.end:
+                days[day] = segment.ownership
+                day += timedelta(days=1)
+        return days
+
+    def assert_matches_ownership_on_every_day(self, start, end):
+        owner_periods, reserved_periods = load_periods()
+        by_day = self.ownership_by_day(start, end)
+        self.assertEqual(min(by_day), start)
+        self.assertEqual(max(by_day), end)
+        self.assertEqual(len(by_day), (end - start).days + 1)
+        for day, ownership in by_day.items():
+            self.assertEqual(ownership, ownership_on(day, owner_periods, reserved_periods), day)
+
+    # -- the reported case -------------------------------------------------------
+
+    def test_segments_close_at_the_end_of_the_variation_date(self):
+        self.sample_2025()
+        report = self.report(change_day_belongs_to="outgoing")
+        self.assertEqual(self.bounds(report), [("2025-01-01", "2025-06-30"), ("2025-07-01", "2025-12-31")])
+        self.assertEqual([segment["days"] for segment in report["segments"]], [181, 184])
+        self.assertEqual(report["segments"][0]["change_dates"], [])
+        self.assertEqual(report["segments"][1]["change_dates"], ["2025-06-30"])
+
+    def test_income_on_either_side_of_the_variation_goes_to_who_owned_that_day(self):
+        self.sample_2025()
+        self.sale("2025-07-01", "300.00")
+        july = self.report()
+        self.assertEqual({row["name"]: row["amount"] for row in july["totals_by_owner"]}, {"Alice": "150.00", "Bob": "150.00", "Carol": "0.00"})
+        self.assertEqual({row["name"]: row["effective_pct"] for row in ownership_as_of(D("2025-07-01"))["owners"]}, {"Alice": "50.0000", "Bob": "50.0000", "Carol": "0.0000"})
+        JournalEntry.objects.all().delete()
+        self.sale("2025-06-30", "300.00")
+        june = self.report()
+        self.assertEqual({row["name"]: row["amount"] for row in june["totals_by_owner"]}, {"Alice": "100.00", "Bob": "100.00", "Carol": "100.00"})
+
+    def test_totals_tie_to_net_income_with_nothing_unallocated(self):
+        self.sample_2025()
+        for day, amount in [("2025-01-01", "10.00"), ("2025-06-30", "300.00"), ("2025-07-01", "300.00"), ("2025-12-31", "0.01")]:
+            self.sale(day, amount)
+        self.expense("2025-07-02", "55.55")
+        report = self.report()
+        total = sum((Decimal(row["amount"]) for row in report["totals_by_owner"]), Decimal("0"))
+        self.assertEqual(total, income_statement(*self.YEAR)["net_income"])
+        self.assertEqual(report["net_income"], f"{total:.2f}")
+        self.assertEqual(report["unallocated"], "0.00")
+
+    def test_response_shape_is_unchanged(self):
+        self.sample_2025()
+        report = self.report()
+        self.assertEqual(set(report), {"start", "end", "method", "convention", "change_day_belongs_to", "unissued_allocation_policy", "written_statement", "written_statement_date", "segments", "totals_by_owner", "net_income", "unallocated", "warnings"})
+        self.assertEqual(set(report["segments"][1]), {"start", "end", "days", "change_dates", "net_income", "allocated_income", "by_account", "reserved_pct", "total_issued_pct", "allocations"})
+
+    # -- the invariant -----------------------------------------------------------
+
+    def test_every_day_uses_the_ownership_on_file_for_that_day(self):
+        self.sample_2025()
+        self.assert_matches_ownership_on_every_day(*self.YEAR)
+        owner_periods, reserved_periods = load_periods()
+        by_day = self.ownership_by_day(*self.YEAR)
+        for day in ["2025-01-01", "2025-06-30", "2025-07-01", "2025-12-31"]:
+            stated = {row["owner_id"]: row["stated_pct"] for row in ownership_as_of(D(day))["owners"] if row["stated_pct"] != "0.0000"}
+            self.assertEqual({owner_id: pct(value) for owner_id, value in by_day[D(day)].stated if value}, stated, day)
+
+    def test_invariant_holds_through_many_changes(self):
+        self.interest(self.alice, "2025-01-01", "100", end="2025-01-31")
+        self.interest(self.alice, "2025-02-01", "50", end="2025-03-15")
+        self.interest(self.bob, "2025-02-01", "50", end="2025-06-29")
+        self.interest(self.alice, "2025-03-16", "25", end="2025-06-29")
+        self.interest(self.carol, "2025-03-16", "25", end="2025-06-30")
+        self.interest(self.alice, "2025-06-30", "75", end="2025-12-30")
+        self.interest(self.bob, "2025-07-01", "25")
+        self.interest(self.alice, "2025-12-31", "75")
+        self.assert_matches_ownership_on_every_day(*self.YEAR)
+
+    def test_incoming_moves_only_the_variation_date(self):
+        self.sample_2025()
+        owner_periods, reserved_periods = load_periods()
+        outgoing = self.ownership_by_day(*self.YEAR, belongs_to="outgoing")
+        incoming = self.ownership_by_day(*self.YEAR, belongs_to="incoming")
+        different = [day for day in outgoing if outgoing[day] != incoming[day]]
+        self.assertEqual(different, [D("2025-06-30")])
+        self.assertEqual(incoming[D("2025-06-30")], ownership_on(D("2025-07-01"), owner_periods, reserved_periods))
+        report = self.report(change_day_belongs_to="incoming")
+        self.assertEqual(self.bounds(report), [("2025-01-01", "2025-06-29"), ("2025-06-30", "2025-12-31")])
+        self.assertEqual(report["segments"][1]["change_dates"], ["2025-06-30"])
+
+    # -- where the change falls --------------------------------------------------
+
+    def change_on(self, effective_start):
+        """Alice owns everything, then from effective_start Alice and Bob own half each."""
+        day = D(effective_start)
+        self.interest(self.alice, "2024-01-01", "100", end=(day - timedelta(days=1)).isoformat())
+        self.interest(self.alice, effective_start, "50")
+        self.interest(self.bob, effective_start, "50")
+
+    def test_change_at_month_start(self):
+        self.change_on("2025-04-01")
+        self.assertEqual(self.bounds(self.report()), [("2025-01-01", "2025-03-31"), ("2025-04-01", "2025-12-31")])
+        self.assertEqual(self.report()["segments"][1]["change_dates"], ["2025-03-31"])
+        self.assert_matches_ownership_on_every_day(*self.YEAR)
+
+    def test_change_mid_month(self):
+        self.change_on("2025-04-17")
+        self.assertEqual(self.bounds(self.report()), [("2025-01-01", "2025-04-16"), ("2025-04-17", "2025-12-31")])
+        self.assertEqual(self.bounds(self.report(change_day_belongs_to="incoming")), [("2025-01-01", "2025-04-15"), ("2025-04-16", "2025-12-31")])
+        # Variation 04-16: semi-monthly deems it the end of the 15th, monthly the end of April.
+        self.assertEqual(self.bounds(self.report(convention="semi_monthly")), [("2025-01-01", "2025-04-15"), ("2025-04-16", "2025-12-31")])
+        self.assertEqual(self.bounds(self.report(convention="monthly")), [("2025-01-01", "2025-04-30"), ("2025-05-01", "2025-12-31")])
+        self.assert_matches_ownership_on_every_day(*self.YEAR)
+
+    def test_change_on_january_1_is_clamped_to_the_range_start(self):
+        # The variation date is Dec 31 of the prior year.
+        self.change_on("2025-01-01")
+        self.sale("2025-01-01", "10.00")
+        for belongs_to in ["outgoing", "incoming"]:
+            report = self.report(change_day_belongs_to=belongs_to)
+            self.assertEqual(self.bounds(report), [("2025-01-01", "2025-12-31")], belongs_to)
+            self.assertEqual(report["segments"][0]["change_dates"], [], belongs_to)
+            self.assertEqual({row["name"]: row["amount"] for row in report["totals_by_owner"]}, {"Alice": "5.00", "Bob": "5.00"}, belongs_to)
+        prior = partner_allocation_report(D("2024-01-01"), D("2024-12-31"), change_day_belongs_to="incoming")
+        self.assertEqual(self.bounds(prior), [("2024-01-01", "2024-12-30"), ("2024-12-31", "2024-12-31")])
+        self.assertEqual(self.bounds(partner_allocation_report(D("2024-01-01"), D("2024-12-31"))), [("2024-01-01", "2024-12-31")])
+
+    def test_change_on_december_31(self):
+        self.change_on("2025-12-31")
+        self.assertEqual(self.bounds(self.report()), [("2025-01-01", "2025-12-30"), ("2025-12-31", "2025-12-31")])
+        self.assertEqual(self.report()["segments"][1]["change_dates"], ["2025-12-30"])
+        self.assertEqual(self.bounds(self.report(change_day_belongs_to="incoming")), [("2025-01-01", "2025-12-29"), ("2025-12-30", "2025-12-31")])
+        self.assert_matches_ownership_on_every_day(*self.YEAR)
+
+    def test_variation_on_december_31_stays_in_the_old_year_unless_incoming(self):
+        self.change_on("2026-01-01")
+        self.assertEqual(self.bounds(self.report()), [("2025-01-01", "2025-12-31")])
+        self.assertEqual(self.bounds(self.report(change_day_belongs_to="incoming")), [("2025-01-01", "2025-12-30"), ("2025-12-31", "2025-12-31")])
+
+    def test_two_changes_on_consecutive_days(self):
+        self.interest(self.alice, "2025-01-01", "100", end="2025-06-29")
+        self.interest(self.alice, "2025-06-30", "50")
+        self.interest(self.bob, "2025-06-30", "50", end="2025-06-30")
+        self.interest(self.carol, "2025-07-01", "50")
+        self.sale("2025-06-30", "10.00")
+        self.sale("2025-07-01", "20.00")
+        report = self.report()
+        self.assertEqual(self.bounds(report), [("2025-01-01", "2025-06-29"), ("2025-06-30", "2025-06-30"), ("2025-07-01", "2025-12-31")])
+        self.assertEqual([segment["change_dates"] for segment in report["segments"]], [[], ["2025-06-29"], ["2025-06-30"]])
+        self.assertEqual(self.amounts(report["segments"][1]), {"Alice": "5.00", "Bob": "5.00", "Carol": "0.00"})
+        self.assertEqual(self.amounts(report["segments"][2]), {"Alice": "10.00", "Bob": "0.00", "Carol": "10.00"})
+        self.assert_matches_ownership_on_every_day(*self.YEAR)
+        incoming = self.report(change_day_belongs_to="incoming")
+        self.assertEqual(self.bounds(incoming), [("2025-01-01", "2025-06-28"), ("2025-06-29", "2025-06-29"), ("2025-06-30", "2025-12-31")])
+
+    def test_open_ended_final_period_runs_to_the_range_end(self):
+        self.sample_2025()
+        report = self.report(end=D("2030-12-31"))
+        self.assertEqual(self.bounds(report), [("2025-01-01", "2025-06-30"), ("2025-07-01", "2030-12-31")])
+        self.assertEqual(report["warnings"], [])
+
+    # -- conventions -----------------------------------------------------------------
+
+    def test_semi_monthly_and_monthly_use_the_variation_date(self):
+        self.sample_2025()  # variation 2025-06-30, a 16th-or-later date
+        self.assertEqual(self.bounds(self.report(convention="semi_monthly")), [("2025-01-01", "2025-06-15"), ("2025-06-16", "2025-12-31")])
+        self.assertEqual(self.bounds(self.report(convention="monthly")), [("2025-01-01", "2025-06-30"), ("2025-07-01", "2025-12-31")])
+
+    def join_and_leave(self, joins, leaves):
+        self.interest(self.alice, "2025-01-01", "100", end=(D(joins) - timedelta(days=1)).isoformat())
+        self.interest(self.alice, joins, "60", end=leaves)
+        self.interest(self.carol, joins, "40", end=leaves)
+        self.interest(self.alice, (D(leaves) + timedelta(days=1)).isoformat(), "100")
+
+    def test_partner_who_joins_and_leaves_within_one_conventional_period_uses_actual_dates(self):
+        self.join_and_leave("2025-05-03", "2025-05-09")
+        self.sale("2025-05-05", "100.00")
+        for convention in ["calendar_day", "semi_monthly", "monthly"]:
+            report = self.report(convention=convention)
+            self.assertEqual(self.bounds(report), [("2025-01-01", "2025-05-02"), ("2025-05-03", "2025-05-09"), ("2025-05-10", "2025-12-31")], convention)
+            self.assertEqual({row["name"]: row["amount"] for row in report["totals_by_owner"]}, {"Alice": "60.00", "Carol": "40.00"}, convention)
+            self.assertEqual([segment["change_dates"] for segment in report["segments"]], [[], ["2025-05-02"], ["2025-05-09"]], convention)
+
+    def test_partner_who_spans_two_conventional_periods_is_placed_by_the_convention(self):
+        self.join_and_leave("2025-05-03", "2025-05-20")
+        report = self.report(convention="semi_monthly")
+        self.assertEqual(self.bounds(report), [("2025-01-01", "2025-04-30"), ("2025-05-01", "2025-05-15"), ("2025-05-16", "2025-12-31")])
+
+    def test_a_later_deemed_change_does_not_erase_an_actual_dated_partner(self):
+        self.interest(self.alice, "2025-01-01", "100", end="2025-05-02")
+        self.interest(self.alice, "2025-05-03", "60", end="2025-05-09")
+        self.interest(self.carol, "2025-05-03", "40", end="2025-05-09")
+        self.interest(self.alice, "2025-05-10", "100", end="2025-05-12")
+        self.interest(self.alice, "2025-05-13", "50")
+        self.interest(self.bob, "2025-05-13", "50")
+        self.sale("2025-05-05", "100.00")
+        report = self.report(convention="semi_monthly")
+        self.assertEqual(self.bounds(report), [("2025-01-01", "2025-05-02"), ("2025-05-03", "2025-05-09"), ("2025-05-10", "2025-12-31")])
+        self.assertEqual({row["name"]: row["stated_pct"] for row in report["segments"][2]["allocations"]}, {"Alice": "50.0000", "Bob": "50.0000", "Carol": "0.0000"})
+        self.assertEqual(report["segments"][2]["change_dates"], ["2025-05-09", "2025-05-12"])
+        self.assertEqual({row["name"]: row["amount"] for row in report["totals_by_owner"]}, {"Alice": "60.00", "Bob": "0.00", "Carol": "40.00"})
+
+    # -- rounding and the rollforward ---------------------------------------------
+
+    def test_three_way_split_uses_largest_remainder(self):
+        self.sample_2025()
+        self.sale("2025-03-01", "100.00")
+        report = self.report()
+        self.assertEqual(self.amounts(report["segments"][0]), {"Alice": "33.34", "Bob": "33.33", "Carol": "33.33"})
+        self.assertEqual(sum((Decimal(row["amount"]) for row in report["totals_by_owner"]), Decimal("0")), Decimal("100.00"))
+
+    def test_capital_rollforward_picks_up_the_corrected_allocation(self):
+        self.sample_2025()
+        self.sale("2025-07-01", "300.00")
+        rows = {row["owner_name"]: row["allocated_income_loss"] for row in capital_account_rollforward(*self.YEAR)["owners"]}
+        self.assertEqual(rows, {"Alice": "150.00", "Bob": "150.00", "Carol": "0.00"})
+        later = {row["owner_name"]: row["beginning"] for row in capital_account_rollforward(D("2026-01-01"), D("2026-12-31"))["owners"]}
+        self.assertEqual(later, {"Alice": "150.00", "Bob": "150.00", "Carol": "0.00"})

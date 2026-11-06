@@ -162,7 +162,7 @@ export function PartnershipSettingsPage() {
         <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" }, gap: 2 }}>
           {select("allocation_method", "Allocation method", "Interim closing allocates each segment's actual income; proration spreads the year's income by days.")}
           {select("convention", "Convention", "When a mid-month change is treated as taking effect.")}
-          {select("change_day_belongs_to", "Activity on a change date goes to", "Calendar day convention only: who gets income booked on the day new percentages take effect.")}
+          {select("change_day_belongs_to", "Activity on the variation date goes to", "Calendar day convention only: who gets income booked on the last day of the outgoing interest (the day before new percentages take effect). Outgoing matches Treas. Reg. §1.706-4.")}
           {select("unissued_allocation_policy", "Unissued interests", "Reserved pools and any unissued percentage are shared by issued owners in proportion to their holdings.")}
         </Box>
         <Typography variant="h2" sx={{ mt: 3, mb: 1 }}>Written statement</Typography>
@@ -191,7 +191,7 @@ export function PartnerAllocationBody({ data }) {
     <Box>
       <Warnings warnings={data.warnings} />
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        {labels[data.method]} method, {labels[data.convention]?.toLowerCase()} convention{data.convention === "calendar_day" ? `; activity on a change date goes to ${labels[data.change_day_belongs_to]}` : ""}. Unissued interests are shared pro rata among issued owners. This report posts nothing.
+        {labels[data.method]} method, {labels[data.convention]?.toLowerCase()} convention{data.convention === "calendar_day" ? `; activity on the variation date (last day of the outgoing interest) goes to ${labels[data.change_day_belongs_to]}` : ""}. Unissued interests are shared pro rata among issued owners. This report posts nothing.
       </Typography>
       {data.segments.map((segment) => (
         <Box key={segment.start} sx={{ mb: 3 }}>

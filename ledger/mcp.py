@@ -1432,13 +1432,13 @@ def ownership_as_of_tool(user, args):
 
 @tool(
     "partner_allocation_report",
-    "Split a date range's net income or loss among owners under IRC §706(d): the range is cut into segments wherever ownership changes (placed by the convention), each segment's posted revenue and expense is summed by transaction date, and allocated by that segment's effective percentages, rounded with the largest-remainder method so owner amounts add up exactly. Owner totals tie to income_statement net income for the range unless some days have no owners (see unallocated). Defaults come from the company's partnership settings. Nothing is posted.",
+    "Split a date range's net income or loss among owners under IRC §706(d): the range is cut into segments wherever ownership changes (placed by the convention), each segment's posted revenue and expense is summed by transaction date, and allocated by that segment's effective percentages (each segment's change_dates lists the variation dates, i.e. last days of the outgoing interests, that opened it), rounded with the largest-remainder method so owner amounts add up exactly. Owner totals tie to income_statement net income for the range unless some days have no owners (see unallocated). Defaults come from the company's partnership settings. Nothing is posted.",
     {
         "start": {"type": "string", "description": "YYYY-MM-DD"},
         "end": {"type": "string", "description": "YYYY-MM-DD"},
         "method": {"type": "string", "enum": PartnershipSettings.Method.values, "description": "Override the saved allocation method."},
         "convention": {"type": "string", "enum": PartnershipSettings.Convention.values, "description": "Override the saved convention."},
-        "change_day_belongs_to": {"type": "string", "enum": PartnershipSettings.ChangeDay.values, "description": "Under the calendar day convention, whether activity dated on a change date goes to the outgoing or the incoming owners. Overrides the saved setting."},
+        "change_day_belongs_to": {"type": "string", "enum": PartnershipSettings.ChangeDay.values, "description": "Under the calendar day convention, whether activity dated on the variation date (the last day of the outgoing interest, i.e. the day before new percentages take effect) goes to the outgoing owners (default, per Treas. Reg. §1.706-4) or the incoming owners. Overrides the saved setting."},
     },
     required=("start", "end"),
 )

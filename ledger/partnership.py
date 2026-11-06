@@ -16,10 +16,15 @@ Terms used below:
   applied. With pro_rata_to_issued, unissued interests (reserved pools and any gap
   below 100%) are shared by the issued owners in proportion to their holdings,
   so 45/45 with 10 reserved becomes 50/50.
-* change date: the effective_start of new percentages. Under the calendar day
-  convention, change_day_belongs_to decides whether the ledger activity dated on
-  that day goes to the outgoing or the incoming owners. The semi-monthly and
-  monthly conventions instead move every change to the convention's deemed date.
+* variation date: the last day of the outgoing interest, i.e. the effective_end of
+  the old percentages, which is the day before the new ones' effective_start. Under
+  Treas. Reg. §1.706-4(c)(1)(i) a variation is deemed to occur at the end of the day
+  it occurs, so under the calendar day convention the outgoing owners keep the
+  variation date and the next segment starts the day after; change_day_belongs_to
+  = incoming gives the variation date to the new owners instead. The semi-monthly
+  and monthly conventions move every variation to the convention's deemed date,
+  except that a partner who enters and exits within one conventional period is
+  placed on the actual dates (Reg. §1.706-4(c)(2)(ii)).
 """
 
 from dataclasses import dataclass, field
@@ -386,22 +391,26 @@ def first_of_next_month(day):
     return date(day.year + 1, 1, 1) if day.month == 12 else date(day.year, day.month + 1, 1)
 
 
-def deemed_start(change_date, convention, change_day_belongs_to):
-    """The first day the new ownership is treated as in effect, under the convention.
+def deemed_start(variation_date, convention, change_day_belongs_to):
+    """The first day the new ownership is treated as in effect, given the variation date.
 
-    Calendar day: a change is deemed to happen at the end of its day, so by default the
-    outgoing owners keep that day (the new ownership starts the next day); choosing
-    incoming gives the day to the new ownership instead.
-    Semi-monthly: changes on the 1st-15th are deemed to occur on the 1st; on the 16th-end, on the 16th.
-    Monthly: changes on the 1st-15th are deemed to occur on the 1st; on the 16th-end, on the 1st of the next month.
+    The variation date is the last day of the outgoing interest, and the variation is
+    deemed to happen at the end of that day (Treas. Reg. §1.706-4(c)(1)(i)).
+    Calendar day: the outgoing owners keep the variation date and the new ownership
+    starts the next day; choosing incoming gives the variation date to the new ownership.
+    Semi-monthly: a variation on the 1st-15th is deemed to occur at the end of the prior
+    month (new ownership from the 1st); on the 16th-end, at the end of the 15th (from the 16th).
+    Monthly: a variation on the 1st-15th is deemed to occur at the end of the prior month
+    (from the 1st); on the 16th-end, at the end of the month (from the 1st of the next month).
+    change_day_belongs_to only applies under the calendar day convention.
     """
     if convention == PartnershipSettings.Convention.SEMI_MONTHLY:
-        return change_date.replace(day=1 if change_date.day <= 15 else 16)
+        return variation_date.replace(day=1 if variation_date.day <= 15 else 16)
     if convention == PartnershipSettings.Convention.MONTHLY:
-        return change_date.replace(day=1) if change_date.day <= 15 else first_of_next_month(change_date)
+        return variation_date.replace(day=1) if variation_date.day <= 15 else first_of_next_month(variation_date)
     if change_day_belongs_to == PartnershipSettings.ChangeDay.INCOMING:
-        return change_date
-    return change_date + ONE_DAY if change_date < date.max else change_date
+        return variation_date
+    return variation_date + ONE_DAY
 
 
 @dataclass
@@ -409,31 +418,71 @@ class Segment:
     start: date
     end: date
     ownership: Ownership
-    change_dates: list = field(default_factory=list)
+    change_dates: list = field(default_factory=list)  # variation dates that opened this segment
 
     @property
     def days(self):
         return (self.end - self.start).days + 1
 
 
+def actual_date_regimes(regimes, placements):
+    """Regime indexes whose change must be placed on its actual date, not a deemed one.
+
+    Reg. §1.706-4(c)(2)(ii): when a partner's entry and exit would be deemed to happen
+    at the same moment (both inside one conventional period), the convention would
+    erase the partner's interest, so both the entry and the exit use the actual dates.
+    """
+    actual = set()
+    entered = {}  # owner id -> regime index where their current run of interest began
+    for index in range(1, len(regimes)):
+        before = dict(regimes[index - 1][1].stated)
+        after = dict(regimes[index][1].stated)
+        for owner_id in after.keys() - before.keys():
+            entered[owner_id] = index
+        for owner_id in before.keys() - after.keys():
+            entry = entered.pop(owner_id, None)
+            if entry is not None and placements[index] <= placements[entry]:
+                actual.update({entry, index})
+    return actual
+
+
 def segments_for(start, end, convention, change_day_belongs_to, owner_periods=None, reserved_periods=None):
-    """Cut start..end into segments at every ownership change, as the convention places them."""
+    """Cut start..end into segments at every ownership change, as the convention places them.
+
+    For every day the segment's ownership is ownership_on(that day), except where the
+    convention (or change_day_belongs_to = incoming) moves a variation.
+    """
     if owner_periods is None:
         owner_periods, reserved_periods = load_periods()
     regimes = ownership_regimes(owner_periods, reserved_periods)
-    placed = [(date.min, regimes[0][1], None)]
-    for index in range(1, len(regimes)):
-        change_date, state = regimes[index]
-        outgoing = regimes[index - 1][1]
+
+    def variation(index):
+        return regimes[index][0] - ONE_DAY
+
+    def placement(index):
         # When nobody owned anything before, nothing is being taken from an outgoing owner, so the
         # first ownership simply starts on its own date rather than at a deemed one.
-        first_day = deemed_start(change_date, convention, change_day_belongs_to) if outgoing.has_owners else change_date
+        if not regimes[index - 1][1].has_owners:
+            return regimes[index][0]
+        return deemed_start(variation(index), convention, change_day_belongs_to)
+
+    placements = {index: placement(index) for index in range(1, len(regimes))}
+    actual = actual_date_regimes(regimes, placements)
+    placed = [[date.min, regimes[0][1], [], False]]  # [first_day, ownership, variation dates, on actual dates]
+    for index in range(1, len(regimes)):
+        is_actual = index in actual
+        first_day = regimes[index][0] if is_actual else placements[index]
+        folded = []
         # A convention can pull several changes onto one deemed day; the latest ownership wins it.
+        # A change kept on its actual date is not swept back by a later deemed one: the later
+        # change lands on the actual date instead.
         while len(placed) > 1 and placed[-1][0] >= first_day:
-            placed.pop()
-        placed.append((first_day, state, change_date))
+            if placed[-1][3] and placed[-1][0] > first_day:
+                first_day = placed[-1][0]
+            folded = placed.pop()[2] + folded
+        placed.append([first_day, regimes[index][1], folded + [variation(index)], is_actual])
     segments = []
-    for index, (first_day, state, change_date) in enumerate(placed):
+    for index, (first_day, state, variations, _) in enumerate(placed):
         last_day = placed[index + 1][0] - ONE_DAY if index + 1 < len(placed) else date.max
         first_day, last_day = max(first_day, start), min(last_day, end)
         if first_day > last_day:
@@ -441,7 +490,7 @@ def segments_for(start, end, convention, change_day_belongs_to, owner_periods=No
         if segments and segments[-1].ownership == state:
             segments[-1].end = last_day
             continue
-        segments.append(Segment(first_day, last_day, state, [change_date] if change_date and first_day > start else []))
+        segments.append(Segment(first_day, last_day, state, list(variations) if first_day > start else []))
     return segments
 
 
