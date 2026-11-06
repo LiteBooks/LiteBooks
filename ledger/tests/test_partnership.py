@@ -11,7 +11,7 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from ledger.models import Account, AccountingPeriod, ApiToken, AuditEvent, Contact, JournalEntry, OwnerInterestPeriod, PartnershipSettings, UserProfile
+from ledger.models import Account, AccountingPeriod, ApiToken, AuditEvent, Contact, JournalEntry, OwnerInterestPeriod, PartnershipSettings, ReservedInterestPeriod, UserProfile
 from ledger.partnership import (
     capital_account_rollforward,
     delete_interest,
@@ -429,6 +429,101 @@ class RollforwardTests(PartnershipTestCase):
         create_owner_activity(owner=self.alice, kind="loan_in", activity_date=D("2026-02-01"), amount="5000.00", cash_account=self.bank, offset_account=loans, user=self.user)
         row = capital_account_rollforward(D("2026-01-01"), D("2026-12-31"))["owners"][0]
         self.assertEqual(row["ending"], "0.00")
+
+
+class CoverageWarningTests(PartnershipTestCase):
+    """Warnings for days whose recorded interests leave income unallocated or do not add up to 100%."""
+
+    def raw_interest(self, owner, start, percentage, end=None):
+        # Bypasses the save-time 100% check, as imported or hand-edited records can.
+        return OwnerInterestPeriod.objects.create(owner_contact=owner, effective_start=D(start), effective_end=D(end) if end else None, percentage=Decimal(percentage))
+
+    def warnings(self, start, end):
+        return partner_allocation_report(D(start), D(end))["warnings"]
+
+    def test_empty_table_warns_for_the_whole_range_even_with_no_income(self):
+        report = partner_allocation_report(D("2025-01-01"), D("2025-12-31"))
+        self.assertEqual(report["unallocated"], "0.00")
+        self.assertEqual(report["warnings"], ["No ownership interests on file for 2025-01-01 to 2025-12-31 (365 days); income for these days is unallocated."])
+
+    def test_interests_starting_mid_range_warn_for_the_uncovered_prefix_only(self):
+        self.interest(self.alice, "2025-03-15", "100")
+        self.assertEqual(self.warnings("2025-01-01", "2025-12-31"), ["No ownership interests on file for 2025-01-01 to 2025-03-14 (73 days); income for these days is unallocated."])
+
+    def test_a_gap_in_the_middle_is_named(self):
+        self.interest(self.alice, "2026-01-01", "100", end="2026-03-31")
+        self.interest(self.alice, "2026-05-01", "100")
+        self.assertEqual(self.warnings("2026-01-01", "2026-12-31"), ["No ownership interests on file for 2026-04-01 to 2026-04-30 (30 days); income for these days is unallocated."])
+
+    def test_interests_ending_before_the_range_ends_warn_for_the_suffix(self):
+        self.interest(self.alice, "2026-01-01", "100", end="2026-09-30")
+        self.assertEqual(self.warnings("2026-01-01", "2026-12-31"), ["No ownership interests on file for 2026-10-01 to 2026-12-31 (92 days); income for these days is unallocated."])
+
+    def test_uncovered_days_with_income_also_report_the_amount(self):
+        self.interest(self.alice, "2026-03-01", "100")
+        self.sale("2026-02-01", "50.00")
+        warnings = self.warnings("2026-01-01", "2026-12-31")
+        self.assertEqual(warnings[0], "No ownership interests on file for 2026-01-01 to 2026-02-28 (59 days); income for these days is unallocated.")
+        self.assertIn("50.00 of net income", warnings[1])
+
+    def test_exactly_100_percent_coverage_has_no_warnings(self):
+        self.sample()
+        self.interest(self.alice, "2026-01-01", "50", end="2026-02-28")
+        self.interest(self.bob, "2026-01-01", "50", end="2026-02-28")
+        self.assertEqual(self.warnings("2026-01-01", "2026-12-31"), [])
+
+    def test_open_ended_final_period_covers_every_later_day(self):
+        self.interest(self.alice, "2026-01-01", "100", end="2026-06-30")
+        self.interest(self.alice, "2026-07-01", "60")
+        self.interest(self.bob, "2026-07-01", "40")
+        self.assertEqual(self.warnings("2026-01-01", "2035-12-31"), [])
+
+    def test_overlap_over_100_percent_names_the_dates(self):
+        self.interest(self.alice, "2026-01-01", "60")
+        self.interest(self.bob, "2026-01-01", "40")
+        self.raw_interest(self.carol, "2026-06-01", "10", end="2026-06-10")
+        self.assertEqual(self.warnings("2026-01-01", "2026-12-31"), [
+            "Issued and reserved interests total 110.0000% for 2026-06-01 to 2026-06-10 (10 days), which is over 100%; check the ownership periods on file for these dates. Income is allocated by each owner's share of issued interests.",
+        ])
+
+    def test_reserved_interests_count_toward_the_overlap(self):
+        self.interest(self.alice, "2026-01-01", "95")
+        ReservedInterestPeriod.objects.create(label="Pool", effective_start=D("2026-03-01"), effective_end=D("2026-03-01"), percentage=Decimal("10"))
+        self.assertEqual(self.warnings("2026-01-01", "2026-12-31")[1], "Issued and reserved interests total 105.0000% on 2026-03-01 (1 day), which is over 100%; check the ownership periods on file for these dates. Income is allocated by each owner's share of issued interests.")
+
+    def test_under_100_percent_names_the_gap(self):
+        self.interest(self.alice, "2026-01-01", "45")
+        self.interest(self.bob, "2026-01-01", "45")
+        self.assertEqual(self.warnings("2026-01-01", "2026-12-31"), [
+            "Issued and reserved interests total 90.0000% for 2026-01-01 to 2026-12-31 (365 days), leaving 10.0000% unaccounted for; income for these days is shared by the issued owners in proportion to their holdings.",
+        ])
+
+    def test_single_day_range_on_a_change_date(self):
+        self.change_on_july_1_with_a_gap_before()
+        self.assertEqual(self.warnings("2026-07-01", "2026-07-01"), [])
+        self.assertEqual(self.warnings("2026-06-30", "2026-06-30"), ["No ownership interests on file on 2026-06-30 (1 day); income for these days is unallocated."])
+        self.assertEqual(self.warnings("2026-03-01", "2026-03-01"), [])
+
+    def change_on_july_1_with_a_gap_before(self):
+        self.interest(self.alice, "2026-03-01", "100", end="2026-06-29")
+        self.interest(self.alice, "2026-07-01", "50")
+        self.interest(self.bob, "2026-07-01", "50")
+
+    def test_rollforward_carries_the_coverage_warnings(self):
+        self.interest(self.alice, "2026-03-01", "100")
+        report = capital_account_rollforward(D("2026-01-01"), D("2026-12-31"))
+        self.assertEqual(report["warnings"], ["No ownership interests on file for 2026-01-01 to 2026-02-28 (59 days); income for these days is unallocated."])
+
+    def test_rollforward_with_no_interests_warns_for_the_range(self):
+        report = capital_account_rollforward(D("2025-01-01"), D("2025-12-31"))
+        self.assertEqual(report["warnings"], ["No ownership interests on file for 2025-01-01 to 2025-12-31 (365 days); income for these days is unallocated."])
+
+    def test_warnings_change_no_records(self):
+        self.interest(self.alice, "2026-03-01", "100")
+        before = OwnerInterestPeriod.objects.count(), AuditEvent.objects.count(), JournalEntry.objects.count()
+        self.warnings("2026-01-01", "2026-12-31")
+        capital_account_rollforward(D("2026-01-01"), D("2026-12-31"))
+        self.assertEqual((OwnerInterestPeriod.objects.count(), AuditEvent.objects.count(), JournalEntry.objects.count()), before)
 
 
 class ApiTests(PartnershipTestCase):
